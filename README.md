@@ -61,6 +61,8 @@ Then copy the binary to the Raspberry Pi:
 scp build/release-arm/digital_clock_v3 <username>@<hostname>:~
 ```
 
+Alternatively, you can run `./deploy.sh <username> <hostname>` to copy the binary and restart the service on the Raspberry Pi.
+
 ## Autostart
 
 ```bash
