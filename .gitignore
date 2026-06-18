@@ -4,6 +4,6 @@ cmake-build-debug/
 .idea/
 .zed/
 .cache/
-pi_sysroot/
+pi_sysroot*/
 __cmake_systeminformation/
 .env
