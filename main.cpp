@@ -318,7 +318,7 @@ public:
     }
 #endif
 
-    snow.Init(Config::screen_width, Config::screen_height, Config::num_snowflakes);
+    // snow.Init(Config::screen_width, Config::screen_height, Config::num_snowflakes);
 
     // Start Data Threads
     bgLoaderThread = std::jthread(&Clock::FetchBackgroundImage, this);
@@ -331,7 +331,7 @@ public:
 
   SDL_AppResult Iterate() {
     UpdateTiming();
-    snow.Update(deltaTime);
+    // snow.Update(deltaTime);
     UpdateTextures();
     Render();
     return SDL_APP_CONTINUE;
@@ -344,7 +344,7 @@ private:
   FontPtr fontNormal;
   FontPtr fontSmall;
 
-  SnowSystem snow;
+  // SnowSystem snow;
 
   // Background Image
   std::jthread bgLoaderThread;
@@ -616,7 +616,7 @@ private:
       SDL_SetTextureColorMod(bgTexture.get(), 200, 200, 200);
       RenderTextureCover(bgTexture.get());
     }
-    snow.Draw(renderer.get());
+    // snow.Draw(renderer.get());
     dateLabel.draw(renderer.get());
     timeLabel.draw(renderer.get());
     weatherLabel.draw(renderer.get());
