@@ -377,7 +377,10 @@ private:
                 int wrapWidth = 0) {
       if (text == newText && texture && wrapWidth == lastWrapWidth) return;
       if (newText.empty()) {
+        text.clear();
+        lastWrapWidth = wrapWidth;
         texture.reset();
+        rect = {};
         return;
       }
       text = newText;
@@ -464,7 +467,7 @@ private:
       double tempForLLM = 0.0;
       bool weatherFetched = false;
       try {
-        cpr::Response response = cpr::Get(url, params);
+        cpr::Response response = cpr::Get(url, params, cpr::Timeout{60000});
         if (response.status_code == 200) {
           auto json_data = json::parse(response.text);
           auto wd = json_data.get<WeatherData>();
@@ -489,6 +492,16 @@ private:
       } catch (const std::exception &e) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Weather fetch failed: %s", e.what());
       }
+      if (!weatherFetched) {
+        {
+          std::scoped_lock lock(weatherMutex);
+          weatherString.clear();
+        }
+        {
+          std::scoped_lock lock(adviceMutex);
+          adviceString.clear();
+        }
+      }
       if (weatherFetched) {
         std::string finalAdvice;
         std::string apiKey = Config::GroqApiKey;
@@ -511,7 +524,8 @@ private:
                   {{"role", "user"}, {"content", prompt}}}}};
             cpr::Response r = cpr::Post(
                 cpr::Url{"https://api.groq.com/openai/v1/chat/completions"}, cpr::Body{payload.dump()},
-                cpr::Header{{"Authorization", std::string("Bearer ") + apiKey}, {"Content-Type", "application/json"}});
+                cpr::Header{{"Authorization", std::string("Bearer ") + apiKey}, {"Content-Type", "application/json"}},
+                cpr::Timeout{60000});
             if (r.status_code == 200) {
               auto llmResp = json::parse(r.text).get<LlmResponse>();
               if (!llmResp.choices.empty()) {
