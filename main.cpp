@@ -157,12 +157,9 @@ std::string getCurrentTime() {
 }
 
 std::string getCurrentDate() {
-  auto now = std::chrono::system_clock::now();
-  auto days = std::chrono::floor<std::chrono::days>(now);
-  std::chrono::year_month_day ymd{days};
-  std::chrono::weekday wd{days};
-  return std::format("{}, {} {} {} года", weekdays[wd.c_encoding()], static_cast<unsigned>(ymd.day()),
-                     months[static_cast<unsigned>(ymd.month()) - 1], static_cast<int>(ymd.year()));
+  auto t = std::time(nullptr);
+  auto tm = *std::localtime(&t);
+  return std::format("{}, {} {} {} года", weekdays[tm.tm_wday], tm.tm_mday, months[tm.tm_mon], tm.tm_year + 1900);
 }
 
 class SnowSystem {
