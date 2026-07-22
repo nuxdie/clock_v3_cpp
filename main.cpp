@@ -13,24 +13,18 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <ctime>
-#include <execution>
 #include <format>
-#include <functional>
-#include <map>
-#include <memory>
 #include <mutex>
-#include <numbers>
-#include <random>
-#include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
-#include "font_data.h"
+#include "assets_fonts.h"
+#include "assets_icons.h"
 
-using namespace std::string_literals;
 using json = nlohmann::json;
 
 template <typename T, auto Deleter>
@@ -44,12 +38,8 @@ using FontPtr = SdlPtr<TTF_Font, TTF_CloseFont>;
 namespace Config {
 constexpr int screen_width = 1024;
 constexpr int screen_height = 600;
-constexpr int font_big_size = 382;
-constexpr int font_normal_size = 48;
-constexpr int font_small_size = 32;
-constexpr int num_snowflakes = 666;
 constexpr const char *AppName = "Digital Clock v3";
-constexpr const char *AppVersion = "0.2.1";
+constexpr const char *AppVersion = "0.3.0";
 
 // GROQ_API_KEY is defined via CMake target_compile_definitions
 #ifndef GROQ_API_KEY
@@ -57,213 +47,252 @@ constexpr const char *GroqApiKey = "";
 #else
 constexpr const char *GroqApiKey = GROQ_API_KEY;
 #endif
+
+// Layout (logical pixels)
+constexpr float pad_x = 56.0f;
+constexpr float date_baseline = 84.0f;
+constexpr float time_baseline = 362.0f;
+constexpr float time_size = 300.0f;
+constexpr float strip_baseline = 470.0f; // baseline of the weather numbers
+constexpr float rain_cap_baseline = 512.0f;
+constexpr float rain_chart_top = 524.0f;
+constexpr float rain_chart_h = 30.0f;
+constexpr float rain_axis_baseline = 570.0f;
 } // namespace Config
 
-struct BingImage {
-  std::string fullUrl;
-  std::string date; // format "2025-11-22"
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(BingImage, fullUrl, date)
+// ---------------------------------------------------------------- colour --
 
-struct CurrentWeather {
-  double temperature;
-  double windspeed;
-  int weathercode;
+struct Col {
+  float r = 0, g = 0, b = 0, a = 255; // 0..255, kept as float for cheap mixing
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CurrentWeather, temperature, windspeed, weathercode)
-
-struct WeatherData {
-  CurrentWeather current_weather;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WeatherData, current_weather)
-
-struct LlmMessage {
-  std::string role;
-  std::string content;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LlmMessage, role, content)
-struct LlmChoice {
-  int index;
-  LlmMessage message;
-  std::string finish_reason;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LlmChoice, index, message, finish_reason)
-struct LlmResponse {
-  std::string id;
-  std::vector<LlmChoice> choices;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LlmResponse, id, choices)
-
-namespace {
-const std::map<int, std::string_view> WEATHER_CODE_RU = {{0, "ясно"},
-                                                         {1, "редкие облака"},
-                                                         {2, "переменная облачность"},
-                                                         {3, "облачно"},
-                                                         {45, "туман"},
-                                                         {48, "изморозь"},
-                                                         {51, "легкая морось"},
-                                                         {53, "моросит"},
-                                                         {55, "плотно моросит"},
-                                                         {56, "ледяная морось"},
-                                                         {57, "тяжелая ледяная морось"},
-                                                         {61, "легкий дождик"},
-                                                         {63, "дождь"},
-                                                         {65, "ливень"},
-                                                         {66, "холодный дождь"},
-                                                         {67, "ледяной ливень"},
-                                                         {71, "снежок"},
-                                                         {73, "снегопад"},
-                                                         {75, "сильный снегопад"},
-                                                         {77, "снежный град"},
-                                                         {80, "ливневый дождик"},
-                                                         {81, "ливни"},
-                                                         {82, "плотные ливни"},
-                                                         {85, "снежный дождик"},
-                                                         {86, "снежные дожди"},
-                                                         {95, "небольшая гроза"},
-                                                         {96, "гроза с маленьким градом"},
-                                                         {99, "град с грозой"}};
-[[nodiscard]] std::string_view getWindspeedType(double windspeed) {
-  if (windspeed < 1.0) return "штиль";
-  if (windspeed <= 5.0) return "ветерок";
-  if (windspeed <= 10.0) return "ветер";
-  if (windspeed <= 15.0) return "сильный ветер";
-  if (windspeed <= 20.0) return "шквальный ветер";
-  return "ураган";
+constexpr Col mix(const Col &a, const Col &b, float t) {
+  return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
 }
-[[nodiscard]] std::string getBasicAdvice(double temperature) {
-  if (temperature < -10) {
-    return "Наденьте теплую зимнюю куртку, шапку, шарф и теплые ботинки.";
-  } else if (temperature < 0) {
-    return "Наденьте зимнюю куртку и теплые аксессуары.";
-  } else if (temperature < 10) {
-    return "Наденьте куртку и шапку.";
-  } else if (temperature < 20) {
-    return "Наденьте легкую куртку или свитер.";
-  } else {
-    return "Наденьте легкую одежду.";
+
+struct Palette {
+  Col bg0, bg1, ink, inkDim, inkMute, accent, rain, hair;
+};
+// night: deep blue ink, warm amber accent, cool rain-blue
+constexpr Palette kDark{{13, 20, 29}, {10, 15, 22},  {238, 243, 249}, {125, 138, 160},
+                        {77, 87, 105}, {240, 182, 94}, {111, 177, 227}, {255, 255, 255, 23}};
+// day: cool off-white, ink text
+constexpr Palette kLight{{238, 241, 245}, {228, 232, 238}, {18, 24, 33},  {86, 98, 116},
+                         {151, 161, 176}, {193, 125, 28},  {47, 127, 196}, {18, 24, 33, 31}};
+
+Palette mixPalette(float f) {
+  return {mix(kDark.bg0, kLight.bg0, f),       mix(kDark.bg1, kLight.bg1, f),     mix(kDark.ink, kLight.ink, f),
+          mix(kDark.inkDim, kLight.inkDim, f), mix(kDark.inkMute, kLight.inkMute, f),
+          mix(kDark.accent, kLight.accent, f), mix(kDark.rain, kLight.rain, f),   mix(kDark.hair, kLight.hair, f)};
+}
+
+// Day factor 0 (night) .. 1 (day), with a one-hour crossfade at 07:00 and 19:00.
+float dayFactor(const std::tm &tm) {
+  float h = tm.tm_hour + tm.tm_min / 60.0f;
+  if (h <= 7.0f || h >= 19.0f) return 0.0f;
+  if (h >= 8.0f && h <= 18.0f) return 1.0f;
+  return (h < 8.0f) ? (h - 7.0f) : (19.0f - h);
+}
+
+// ------------------------------------------------------------- weather ----
+
+enum class Icon { ClearDay, ClearNight, PartlyDay, PartlyNight, Cloudy, Fog, Rain, Snow, Thunder, Wind, COUNT };
+
+Icon iconFor(int code, bool day) {
+  switch (code) {
+  case 0: return day ? Icon::ClearDay : Icon::ClearNight;
+  case 1:
+  case 2: return day ? Icon::PartlyDay : Icon::PartlyNight;
+  case 3: return Icon::Cloudy;
+  case 45:
+  case 48: return Icon::Fog;
+  case 71:
+  case 73:
+  case 75:
+  case 77:
+  case 85:
+  case 86: return Icon::Snow;
+  case 95:
+  case 96:
+  case 99: return Icon::Thunder;
+  default: return Icon::Rain; // drizzle 51-57, rain 61-67, showers 80-82
   }
 }
-constexpr std::array<std::string_view, 7> weekdays = {"воскресенье", "понедельник", "вторник", "среда",
-                                                      "четверг",     "пятница",     "суббота"};
-constexpr std::array<std::string_view, 12> months = {"января", "февраля", "марта",    "апреля",  "мая",    "июня",
-                                                     "июля",   "августа", "сентября", "октября", "ноября", "декабря"};
-} // namespace
 
-std::string getCurrentTime() {
-  auto t = std::time(nullptr);
-  auto tm = *std::localtime(&t);
-  return std::format("{}:{:02}", tm.tm_hour, tm.tm_min);
+std::string conditionText(int code) {
+  switch (code) {
+  case 0: return "clear sky";
+  case 1: return "mainly clear";
+  case 2: return "partly cloudy";
+  case 3: return "overcast";
+  case 45: return "fog";
+  case 48: return "rime fog";
+  case 51: return "light drizzle";
+  case 53: return "drizzle";
+  case 55: return "dense drizzle";
+  case 61: return "light rain";
+  case 63: return "rain";
+  case 65: return "heavy rain";
+  case 71: return "light snow";
+  case 73: return "snow";
+  case 75: return "heavy snow";
+  case 80: return "rain showers";
+  case 81: return "rain showers";
+  case 82: return "violent rain showers";
+  case 95: return "thunderstorm";
+  case 96:
+  case 99: return "thunderstorm with hail";
+  default: return "unknown";
+  }
 }
 
-std::string getCurrentDate() {
-  auto t = std::time(nullptr);
-  auto tm = *std::localtime(&t);
-  return std::format("{}, {} {} {} года", weekdays[tm.tm_wday], tm.tm_mday, months[tm.tm_mon], tm.tm_year + 1900);
+std::string basicAdvice(double t) {
+  if (t < -10) return "Heavy winter coat, hat, scarf and warm boots.";
+  if (t < 0) return "A winter coat and warm layers.";
+  if (t < 10) return "A warm coat and a hat.";
+  if (t < 20) return "A light jacket or a sweater.";
+  return "Light clothing is fine.";
 }
 
-class SnowSystem {
-public:
-  struct Flake {
-    float x, y;
-    float size;
-    float speedY;
-    float swayPhase;
-    float swaySpeed;
-    float depth; // 0.0 (far) to 1.0 (near)
-    SDL_FColor color;
+constexpr std::array<std::string_view, 7> kWeekdays = {"Sunday",   "Monday", "Tuesday",  "Wednesday",
+                                                       "Thursday", "Friday", "Saturday"};
+constexpr std::array<std::string_view, 12> kMonths = {"January", "February", "March",     "April",   "May",      "June",
+                                                      "July",    "August",   "September", "October", "November", "December"};
+
+std::string dateString(const std::tm &tm) {
+  return std::format("{}, {} {} {}", kWeekdays[tm.tm_wday], tm.tm_mday, kMonths[tm.tm_mon], tm.tm_year + 1900);
+}
+
+std::tm localNow() {
+  auto t = std::time(nullptr);
+  return *std::localtime(&t);
+}
+
+std::time_t parseTs(const std::string &s) {
+  std::tm tm{};
+  int Y, M, D, h, mi;
+  if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d", &Y, &M, &D, &h, &mi) != 5) return 0;
+  tm.tm_year = Y - 1900;
+  tm.tm_mon = M - 1;
+  tm.tm_mday = D;
+  tm.tm_hour = h;
+  tm.tm_min = mi;
+  tm.tm_isdst = -1;
+  return std::mktime(&tm);
+}
+
+struct WeatherState {
+  bool valid = false;
+  double temperature = 0;
+  double windspeed = 0;
+  int weathercode = 0;
+  std::string advice;
+  std::vector<float> rain; // precipitation mm per 15-min step, starting ~now
+};
+
+// ------------------------------------------------------------- helpers ----
+
+std::size_t utf8Len(unsigned char c) {
+  if (c < 0x80) return 1;
+  if ((c >> 5) == 0x6) return 2;
+  if ((c >> 4) == 0xE) return 3;
+  if ((c >> 3) == 0x1E) return 4;
+  return 1;
+}
+
+// A cached single-run text texture, always rendered white and tinted at draw time
+// so theme colour changes and blinking are free (no re-rasterisation).
+struct Label {
+  TexturePtr tex;
+  float w = 0, h = 0;
+  int ascent = 0;
+  std::string cache;
+  int wrapCache = -1;
+
+  void set(SDL_Renderer *r, TTF_Font *f, const std::string &s, int wrap = 0) {
+    if (s == cache && tex && wrap == wrapCache) return;
+    cache = s;
+    wrapCache = wrap;
+    ascent = TTF_GetFontAscent(f);
+    if (s.empty()) {
+      tex.reset();
+      w = h = 0;
+      return;
+    }
+    SDL_Color white{255, 255, 255, 255};
+    SurfacePtr surf(wrap > 0 ? TTF_RenderText_Blended_Wrapped(f, s.c_str(), 0, white, wrap)
+                             : TTF_RenderText_Blended(f, s.c_str(), 0, white));
+    if (surf) {
+      tex.reset(SDL_CreateTextureFromSurface(r, surf.get()));
+      w = (float)surf->w;
+      h = (float)surf->h;
+    }
+  }
+
+  void drawTop(SDL_Renderer *r, float x, float y, Col c, float alpha = 1.0f) const {
+    if (!tex) return;
+    SDL_SetTextureColorMod(tex.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b);
+    SDL_SetTextureAlphaMod(tex.get(), (Uint8)std::clamp(c.a * alpha, 0.0f, 255.0f));
+    SDL_FRect dst{x, y, w, h};
+    SDL_RenderTexture(r, tex.get(), nullptr, &dst);
+  }
+  // place so the text baseline sits at baselineY
+  void drawBase(SDL_Renderer *r, float x, float baselineY, Col c, float alpha = 1.0f) const {
+    drawTop(r, x, baselineY - ascent, c, alpha);
+  }
+};
+
+// Per-glyph rendered run so we can apply letter tracking (SDL_ttf has none).
+struct TrackedLabel {
+  std::string cache;
+  float totalW = 0;
+  int ascent = 0;
+  struct G {
+    TexturePtr t;
+    float x = 0, w = 0, h = 0;
   };
+  std::vector<G> gs;
 
-  void Init(int width, int height, int count = 200) {
-    screenWidth = (float)width;
-    screenHeight = (float)height;
-
-    flakes.resize(count);
-    vertices.resize(count * 4);
-    indices.resize(count * 6);
-
-    std::vector<int> indexPattern = {0, 1, 2, 2, 3, 0};
-    for (size_t i = 0; i < flakes.size(); ++i) {
-      int vStart = static_cast<int>(i * 4);
-      int iStart = static_cast<int>(i * 6);
-      for (int k = 0; k < 6; ++k) {
-        indices[iStart + k] = vStart + indexPattern[k];
+  void set(SDL_Renderer *r, TTF_Font *f, const std::string &s, float tracking) {
+    if (s == cache && !gs.empty()) return;
+    cache = s;
+    gs.clear();
+    ascent = TTF_GetFontAscent(f);
+    float x = 0;
+    for (std::size_t i = 0; i < s.size();) {
+      std::size_t n = utf8Len((unsigned char)s[i]);
+      std::string ch = s.substr(i, n);
+      i += n;
+      G g;
+      SDL_Color white{255, 255, 255, 255};
+      SurfacePtr surf(TTF_RenderText_Blended(f, ch.c_str(), 0, white));
+      if (surf && surf->w > 0) {
+        g.t.reset(SDL_CreateTextureFromSurface(r, surf.get()));
+        g.w = (float)surf->w;
+        g.h = (float)surf->h;
+      } else {
+        int mw = 0, mh = 0;
+        TTF_GetStringSize(f, ch.c_str(), 0, &mw, &mh); // spaces have no pixels
+        g.w = (float)mw;
       }
+      g.x = x;
+      x += g.w + tracking;
+      gs.push_back(std::move(g));
     }
-    std::mt19937 gen(std::random_device{}());
-    for (auto &f : flakes) {
-      ResetFlake(f, gen, true);
+    totalW = x > 0 ? x - tracking : 0;
+  }
+
+  void draw(SDL_Renderer *r, float ox, float baselineY, Col c) const {
+    for (const auto &g : gs) {
+      if (!g.t) continue;
+      SDL_SetTextureColorMod(g.t.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b);
+      SDL_SetTextureAlphaMod(g.t.get(), (Uint8)c.a);
+      SDL_FRect dst{ox + g.x, baselineY - ascent, g.w, g.h};
+      SDL_RenderTexture(r, g.t.get(), nullptr, &dst);
     }
-  }
-
-  void Update(double dt) {
-    windTimer += dt;
-    const float slowWind = 20.0f * std::sin((float)windTimer * 0.5f);
-    const float gustWind = 10.0f * std::sin((float)windTimer * 2.5f);
-    const float currentWind = slowWind + gustWind + 5.0f;
-    const float fDt = static_cast<float>(dt);
-
-    std::for_each(std::execution::par_unseq, flakes.begin(), flakes.end(), [&, this](Flake &f) {
-      f.y += f.speedY * fDt;
-      float individualSway = std::sin((float)windTimer * f.swaySpeed + f.swayPhase) * (10.0f * (1.0f - f.depth));
-      f.x += (currentWind * f.depth + individualSway) * fDt;
-      if (f.y > screenHeight) {
-        f.y = -f.size;
-        f.x = std::fmod(f.x + 100.0f, screenWidth);
-      }
-      if (f.x > screenWidth)
-        f.x = -f.size;
-      else if (f.x < -f.size)
-        f.x = screenWidth;
-    });
-
-    auto indicesView = std::views::iota(size_t{0}, flakes.size()) | std::views::common;
-    std::for_each(std::execution::par_unseq, indicesView.begin(), indicesView.end(), [this](size_t i) {
-      const auto &f = flakes[i];
-      size_t vIdx = i * 4;
-      const float right = f.x + f.size;
-      const float bottom = f.y + f.size;
-      vertices[vIdx + 0].position = {f.x, f.y};
-      vertices[vIdx + 0].color = f.color;
-      vertices[vIdx + 1].position = {right, f.y};
-      vertices[vIdx + 1].color = f.color;
-      vertices[vIdx + 2].position = {right, bottom};
-      vertices[vIdx + 2].color = f.color;
-      vertices[vIdx + 3].position = {f.x, bottom};
-      vertices[vIdx + 3].color = f.color;
-    });
-  }
-
-  void Draw(SDL_Renderer *renderer) {
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    SDL_RenderGeometry(renderer, nullptr, vertices.data(), static_cast<int>(vertices.size()), indices.data(),
-                       static_cast<int>(indices.size()));
-  }
-
-private:
-  float screenWidth = 0;
-  float screenHeight = 0;
-  double windTimer = 0.0;
-  std::vector<Flake> flakes;
-  std::vector<SDL_Vertex> vertices;
-  std::vector<int> indices;
-  std::uniform_real_distribution<float> distDepth{0.2f, 1.0f};
-  std::uniform_real_distribution<float> distPhase{0.0f, 2.0f * std::numbers::pi_v<float>};
-
-  void ResetFlake(Flake &f, std::mt19937 &gen, bool randomizeY) {
-    std::uniform_real_distribution<float> distX(0.0f, screenWidth);
-    std::uniform_real_distribution<float> distY(-50.0f, screenHeight);
-    f.depth = distDepth(gen);
-    f.size = 2.0f + (f.depth * 3.0f);
-    f.speedY = 30.0f + (f.depth * 60.0f);
-    f.swayPhase = distPhase(gen);
-    f.swaySpeed = 1.0f + (f.depth * 2.0f);
-    f.x = distX(gen);
-    f.y = randomizeY ? distY(gen) : -f.size;
-    float alphaVal = 0.2f + (f.depth * 0.8f);
-    f.color = {1.0f, 1.0f, 1.0f, alphaVal};
   }
 };
+
+// ------------------------------------------------------------- the app ----
 
 class Clock {
 public:
@@ -277,7 +306,6 @@ public:
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
       return false;
     }
-
     SDL_Window *w;
     SDL_Renderer *r;
     if (!SDL_CreateWindowAndRenderer(Config::AppName, Config::screen_width, Config::screen_height, SDL_WINDOW_RESIZABLE,
@@ -287,374 +315,422 @@ public:
     }
     window.reset(w);
     renderer.reset(r);
+    SDL_SetRenderDrawBlendMode(renderer.get(), SDL_BLENDMODE_BLEND);
 
     if (!TTF_Init()) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL_ttf: %s", SDL_GetError());
       return false;
     }
-    fontNormal.reset(TTF_OpenFontIO(SDL_IOFromConstMem(BellotaText_Bold_ttf, BellotaText_Bold_ttf_len), true,
-                                    Config::font_normal_size));
-    fontBig.reset(TTF_OpenFontIO(SDL_IOFromConstMem(BellotaText_Bold_ttf, BellotaText_Bold_ttf_len), true,
-                                 Config::font_big_size));
-    fontSmall.reset(TTF_OpenFontIO(SDL_IOFromConstMem(BellotaText_Bold_ttf, BellotaText_Bold_ttf_len), true,
-                                   Config::font_small_size));
-    if (!fontNormal || !fontBig || !fontSmall) {
-      SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't load embedded font: %s", SDL_GetError());
+    auto open = [](const unsigned char *data, unsigned int len, float size) {
+      return FontPtr(TTF_OpenFontIO(SDL_IOFromConstMem(data, len), true, size));
+    };
+    fTime = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, Config::time_size);
+    fTempNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, 46.0f);
+    fWindNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, 30.0f);
+    fUnitLg = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 22.0f);
+    fUnitSm = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 16.0f);
+    fDate = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 22.0f);
+    fAxis = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 12.0f);
+    fAdvice = open(VictorMono_Italic_ttf, VictorMono_Italic_ttf_len, 33.0f);
+    fRainCap = open(VictorMono_Italic_ttf, VictorMono_Italic_ttf_len, 21.0f);
+    if (!fTime || !fTempNum || !fWindNum || !fUnitLg || !fUnitSm || !fDate || !fAxis || !fAdvice || !fRainCap) {
+      SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't load embedded fonts: %s", SDL_GetError());
       return false;
     }
+
+    // Prefer proper typographic glyphs where the font carries them.
+    windUnit = TTF_FontHasGlyph(fUnitSm.get(), 0x2044) ? "m\xE2\x81\x84s" : "m/s"; // m⁄s
+    approx = TTF_FontHasGlyph(fRainCap.get(), 0x2248) ? "\xE2\x89\x88" : "~";      // ≈
+
+    LoadIcons();
 
     if (!SDL_SetRenderLogicalPresentation(renderer.get(), Config::screen_width, Config::screen_height,
                                           SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
       SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't set logical presentation: %s", SDL_GetError());
     }
-#ifdef APP_DEBUG
-    // Keep cursor visible in debug for easier window movement/closing
-#else
-    if (!SDL_HideCursor()) {
-      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't hide cursor: %s", SDL_GetError());
-    }
+#ifndef APP_DEBUG
+    SDL_HideCursor();
 #endif
 
-    // snow.Init(Config::screen_width, Config::screen_height, Config::num_snowflakes);
+    // Debug: APP_SHOT=path.png saves one frame (after APP_SHOT_FRAME frames) and exits.
+    shotPath = SDL_getenv("APP_SHOT");
+    if (const char *sf = SDL_getenv("APP_SHOT_FRAME")) shotFrame = SDL_atoi(sf);
 
-    // Start Data Threads
-    bgLoaderThread = std::jthread(&Clock::FetchBackgroundImage, this);
     weatherLoaderThread = std::jthread(&Clock::FetchWeather, this);
-
-    lastPerformanceCounter = SDL_GetPerformanceCounter();
-
     return true;
   }
 
   SDL_AppResult Iterate() {
-    UpdateTiming();
-    // snow.Update(deltaTime);
-    UpdateTextures();
     Render();
+    if (shotPath && ++frameCount >= shotFrame) return SDL_APP_SUCCESS;
+    SDL_Delay(16);
     return SDL_APP_CONTINUE;
   }
 
 private:
   WindowPtr window;
   RendererPtr renderer;
-  FontPtr fontBig;
-  FontPtr fontNormal;
-  FontPtr fontSmall;
 
-  // SnowSystem snow;
+  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fAxis, fAdvice, fRainCap;
+  std::array<TexturePtr, (std::size_t)Icon::COUNT> icons;
+  std::string windUnit = "m/s";
+  std::string approx = "~";
+  const std::string deg = "\xC2\xB0";   // °
+  const std::string mdot = " \xC2\xB7 "; // · with spaces
 
-  // Background Image
-  std::jthread bgLoaderThread;
-  std::mutex bgImageLoaderMutex;
-  std::string lastLoadedUrl;
-  SurfacePtr pendingBgImage;
-  TexturePtr bgTexture;
-
-  // Weather Data
   std::jthread weatherLoaderThread;
   std::mutex weatherMutex;
-  std::string weatherString;
+  WeatherState weather;
 
-  // Clothing Advice (LLM)
-  std::mutex adviceMutex;
-  std::string adviceString;
+  const char *shotPath = nullptr;
+  int shotFrame = 180;
+  int frameCount = 0;
 
-  Uint64 lastPerformanceCounter = 0;
-  double fps = 0.0;
-  double deltaTime = 0.0;
+  // Cached label runs
+  TrackedLabel lDate;
+  Label lHH, lColon, lMM;
+  Label lTempNum, lTempUnit, lWindNum, lWindUnit;
+  Label lAdvice, lRainCap, lRainDry;
+  Label lAxisNow, lAxisMid, lAxisEnd;
 
-  struct TextLabel {
-    std::string text;
-    TexturePtr texture;
-    SDL_FRect rect;
-    // Store last wrap width to detect changes needed if window resizes (though fixed logical size simplifies this)
-    int lastWrapWidth = 0;
-
-    // Layout function to position the text label within the window
-    using LayoutFunc = std::function<SDL_FRect(float w, float h)>;
-
-    void update(SDL_Renderer *renderer, TTF_Font *font, std::string_view newText, SDL_Color color, LayoutFunc layout,
-                int wrapWidth = 0) {
-      if (text == newText && texture && wrapWidth == lastWrapWidth) return;
-      if (newText.empty()) {
-        text.clear();
-        lastWrapWidth = wrapWidth;
-        texture.reset();
-        rect = {};
-        return;
-      }
-      text = newText;
-      lastWrapWidth = wrapWidth;
-
-      SurfacePtr surf;
-      if (wrapWidth > 0) {
-        surf.reset(TTF_RenderText_Blended_Wrapped(font, text.c_str(), 0, color, wrapWidth));
-      } else {
-        surf.reset(TTF_RenderText_Blended(font, text.c_str(), 0, color));
-      }
-
-      if (surf) {
-        texture.reset(SDL_CreateTextureFromSurface(renderer, surf.get()));
-        rect = layout((float)surf->w, (float)surf->h);
-      }
-    }
-
-    void draw(SDL_Renderer *renderer) const {
-      if (!texture) return;
-      // Shadow
-      SDL_SetTextureColorMod(texture.get(), 0, 0, 0);
-      SDL_SetTextureAlphaMod(texture.get(), 128);
-      SDL_FRect shadow = rect;
-      shadow.x += 1.0f;
-      shadow.y += 1.0f;
-      SDL_RenderTexture(renderer, texture.get(), nullptr, &shadow);
-      // Text
-      SDL_SetTextureColorMod(texture.get(), 255, 255, 255);
-      SDL_SetTextureAlphaMod(texture.get(), 255);
-      SDL_RenderTexture(renderer, texture.get(), nullptr, &rect);
-    }
-  };
-
-  TextLabel timeLabel;
-  TextLabel dateLabel;
-  TextLabel weatherLabel;
-  TextLabel adviceLabel;
-
-  void FetchBackgroundImage(std::stop_token stopToken) {
-    while (!stopToken.stop_requested()) {
-      try {
-        cpr::Response response = cpr::Get(cpr::Url{"https://peapix.com/bing/feed?country=us"});
-        if (response.status_code == 200) {
-          auto response_json = json::parse(response.text);
-          const auto &images = response_json.get<std::vector<BingImage>>();
-          if (!images.empty()) {
-            // TODO: instead of grabbing the first image, grab the image with today's date
-            std::string imgUrl = images[0].fullUrl;
-            if (imgUrl != lastLoadedUrl) {
-              cpr::Response imgResp = cpr::Get(cpr::Url{imgUrl}, cpr::ReserveSize{2 * 1024 * 1024});
-              if (imgResp.status_code == 200) {
-                SDL_IOStream *io = SDL_IOFromConstMem(imgResp.text.data(), imgResp.text.size());
-                SurfacePtr loadedSurf(IMG_Load_IO(io, true));
-                if (loadedSurf) {
-                  std::lock_guard lock(bgImageLoaderMutex);
-                  pendingBgImage = std::move(loadedSurf);
-                  lastLoadedUrl = imgUrl;
-                }
-              }
-            }
-          }
-        }
-      } catch (const std::exception &e) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Background image fetch failed: %s", e.what());
-      }
-      std::mutex sleepMutex;             // We use a dummy mutex because the condition_variable's wait_for requires
-      std::unique_lock lock(sleepMutex); // a lock to wait on
-      std::condition_variable_any().wait_for(lock, stopToken, std::chrono::hours(4),
-                                             [&stopToken] { return stopToken.stop_requested(); });
+  // -------------------------------------------------------------- assets --
+  void LoadIcons() {
+    struct E {
+      Icon id;
+      const unsigned char *data;
+      unsigned int len;
+    };
+    const std::array<E, (std::size_t)Icon::COUNT> table{{
+        {Icon::ClearDay, icon_clear_day_png, icon_clear_day_png_len},
+        {Icon::ClearNight, icon_clear_night_png, icon_clear_night_png_len},
+        {Icon::PartlyDay, icon_partly_day_png, icon_partly_day_png_len},
+        {Icon::PartlyNight, icon_partly_night_png, icon_partly_night_png_len},
+        {Icon::Cloudy, icon_cloudy_png, icon_cloudy_png_len},
+        {Icon::Fog, icon_fog_png, icon_fog_png_len},
+        {Icon::Rain, icon_rain_png, icon_rain_png_len},
+        {Icon::Snow, icon_snow_png, icon_snow_png_len},
+        {Icon::Thunder, icon_thunder_png, icon_thunder_png_len},
+        {Icon::Wind, icon_wind_png, icon_wind_png_len},
+    }};
+    for (const auto &e : table) {
+      SurfacePtr s(IMG_Load_IO(SDL_IOFromConstMem(e.data, e.len), true));
+      if (!s) continue;
+      TexturePtr t(SDL_CreateTextureFromSurface(renderer.get(), s.get()));
+      if (t) SDL_SetTextureScaleMode(t.get(), SDL_SCALEMODE_LINEAR);
+      icons[(std::size_t)e.id] = std::move(t);
     }
   }
 
+  void drawIcon(Icon ic, float x, float y, float size, Col c, float alpha = 1.0f) {
+    SDL_Texture *t = icons[(std::size_t)ic].get();
+    if (!t) return;
+    SDL_SetTextureColorMod(t, (Uint8)c.r, (Uint8)c.g, (Uint8)c.b);
+    SDL_SetTextureAlphaMod(t, (Uint8)std::clamp(c.a * alpha, 0.0f, 255.0f));
+    SDL_FRect dst{x, y, size, size};
+    SDL_RenderTexture(renderer.get(), t, nullptr, &dst);
+  }
+
+  void fillRect(float x, float y, float w, float h, Col c) {
+    SDL_SetRenderDrawColor(renderer.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b, (Uint8)c.a);
+    SDL_FRect r{x, y, w, h};
+    SDL_RenderFillRect(renderer.get(), &r);
+  }
+
+  void fillCircle(float cx, float cy, float r, Col c) {
+    constexpr int seg = 20;
+    SDL_FColor fc{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
+    SDL_Vertex v[seg + 1];
+    int idx[seg * 3];
+    v[0] = {{cx, cy}, fc, {0, 0}};
+    for (int i = 0; i < seg; ++i) {
+      float a = (float)i / seg * 2.0f * (float)M_PI;
+      v[i + 1] = {{cx + std::cos(a) * r, cy + std::sin(a) * r}, fc, {0, 0}};
+      idx[i * 3] = 0;
+      idx[i * 3 + 1] = i + 1;
+      idx[i * 3 + 2] = (i + 1) % seg + 1;
+    }
+    SDL_RenderGeometry(renderer.get(), nullptr, v, seg + 1, idx, seg * 3);
+  }
+
+  void drawGradient(Col top, Col bot) {
+    SDL_FColor ct{top.r / 255.f, top.g / 255.f, top.b / 255.f, 1.f};
+    SDL_FColor cb{bot.r / 255.f, bot.g / 255.f, bot.b / 255.f, 1.f};
+    const float W = Config::screen_width, H = Config::screen_height;
+    SDL_Vertex v[4] = {
+        {{0, 0}, ct, {0, 0}}, {{W, 0}, ct, {0, 0}}, {{W, H}, cb, {0, 0}}, {{0, H}, cb, {0, 0}}};
+    int idx[6] = {0, 1, 2, 2, 3, 0};
+    SDL_RenderGeometry(renderer.get(), nullptr, v, 4, idx, 6);
+  }
+
+  // --------------------------------------------------------------- data --
   void FetchWeather(std::stop_token stopToken) {
     const auto url = cpr::Url{"https://api.open-meteo.com/v1/forecast"};
-    const auto params = cpr::Parameters{{"latitude", "52.3738"},
-                                        {"longitude", "4.8910"},
-                                        {"current_weather", "true"},
-                                        {"windspeed_unit", "ms"},
+    const auto params = cpr::Parameters{{"latitude", "52.3738"},         {"longitude", "4.8910"},
+                                        {"current_weather", "true"},     {"minutely_15", "precipitation"},
+                                        {"windspeed_unit", "ms"},        {"forecast_days", "2"},
                                         {"timezone", "auto"}};
 
     while (!stopToken.stop_requested()) {
-      std::string weatherDescForLLM = "unknown";
-      double tempForLLM = 0.0;
-      bool weatherFetched = false;
+      bool ok = false;
+      double temp = 0, wind = 0;
+      int code = 0;
+      std::vector<float> rain;
       try {
-        cpr::Response response = cpr::Get(url, params, cpr::Timeout{60000});
-        if (response.status_code == 200) {
-          auto json_data = json::parse(response.text);
-          auto wd = json_data.get<WeatherData>();
-          std::string_view weatherDesc = "Неизвестно";
-          if (auto it = WEATHER_CODE_RU.find(wd.current_weather.weathercode); it != WEATHER_CODE_RU.end()) {
-            weatherDesc = it->second;
+        cpr::Response resp = cpr::Get(url, params, cpr::Timeout{60000});
+        if (resp.status_code == 200) {
+          auto j = json::parse(resp.text);
+          const auto &cw = j.at("current_weather");
+          temp = cw.at("temperature").get<double>();
+          wind = cw.at("windspeed").get<double>();
+          code = cw.at("weathercode").get<int>();
+
+          if (j.contains("minutely_15")) {
+            const auto &m = j.at("minutely_15");
+            const auto &times = m.at("time");
+            const auto &precip = m.at("precipitation");
+            std::time_t now = std::time(nullptr);
+            std::size_t start = 0;
+            while (start < times.size() && parseTs(times[start].get<std::string>()) < now - 450) start++;
+            for (std::size_t i = start; i < start + 8 && i < precip.size(); ++i) {
+              rain.push_back(precip[i].is_null() ? 0.0f : (float)precip[i].get<double>());
+            }
           }
-          weatherDescForLLM = std::string(weatherDesc);
-          tempForLLM = wd.current_weather.temperature;
-          double ws = wd.current_weather.windspeed;
-          std::string windStr(getWindspeedType(ws));
-          if (ws >= 1.0) {
-            windStr = std::format("{} {:.0f} м/с", windStr, ws);
-          }
-          std::string result = std::format("{:.0f}°C, {}, {}", wd.current_weather.temperature, weatherDesc, windStr);
-          {
-            std::scoped_lock lock(weatherMutex);
-            weatherString = std::move(result);
-            weatherFetched = true;
-          }
+          ok = true;
         }
       } catch (const std::exception &e) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Weather fetch failed: %s", e.what());
       }
-      if (!weatherFetched) {
-        {
-          std::scoped_lock lock(weatherMutex);
-          weatherString.clear();
-        }
-        {
-          std::scoped_lock lock(adviceMutex);
-          adviceString.clear();
-        }
-      }
-      if (weatherFetched) {
-        std::string finalAdvice;
-        std::string apiKey = Config::GroqApiKey;
-        auto useFallback = [&]() { finalAdvice = getBasicAdvice(tempForLLM); };
-        if (!apiKey.empty() && apiKey != "MISSING_KEY") {
-          try {
-            std::string prompt = std::format(
-                "I live in Amsterdam. Today is {}, the time is {} and the weather is: {} ({:.0f}C). "
-                "What should I wear? Please answer in one short sentence, in russian. "
-                "Only say what clothes I should wear, there's no need to mention city, current weather or time and "
-                "date. "
-                "Basically, just continue the phrase: You should wear..., without saying the 'you should wear' part.",
-                getCurrentDate(), getCurrentTime(), weatherDescForLLM, tempForLLM);
-            json payload = {
-                {"model", "openai/gpt-oss-120b"},
-                {"max_tokens", 300},
-                {"temperature", 0.7},
-                {"messages",
-                 {{{"role", "system"}, {"content", "You are a helpful assistant providing concise clothing advice."}},
-                  {{"role", "user"}, {"content", prompt}}}}};
-            cpr::Response r = cpr::Post(
-                cpr::Url{"https://api.groq.com/openai/v1/chat/completions"}, cpr::Body{payload.dump()},
-                cpr::Header{{"Authorization", std::string("Bearer ") + apiKey}, {"Content-Type", "application/json"}},
-                cpr::Timeout{60000});
-            if (r.status_code == 200) {
-              auto llmResp = json::parse(r.text).get<LlmResponse>();
-              if (!llmResp.choices.empty()) {
-                finalAdvice = llmResp.choices[0].message.content;
-                if (finalAdvice.size() > 1 && finalAdvice.front() == '"' && finalAdvice.back() == '"') {
-                  finalAdvice = finalAdvice.substr(1, finalAdvice.size() - 2);
-                }
-              } else {
-                useFallback();
-              }
-            } else {
-              SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "LLM fetch failed code %ld: %s", r.status_code,
-                           r.text.c_str());
-              useFallback();
-            }
-          } catch (const std::exception &e) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "LLM fetch exception: %s", e.what());
-            useFallback();
-          }
+
+      std::string advice;
+      if (ok) advice = FetchAdvice(temp, code);
+
+      {
+        std::scoped_lock lock(weatherMutex);
+        if (ok) {
+          weather.valid = true;
+          weather.temperature = temp;
+          weather.windspeed = wind;
+          weather.weathercode = code;
+          weather.rain = std::move(rain);
+          weather.advice = std::move(advice);
         } else {
-          // No valid key
-          useFallback();
-        }
-        {
-          std::lock_guard lock(adviceMutex);
-          adviceString = finalAdvice;
+          weather = WeatherState{};
         }
       }
 
-      std::mutex sleepMutex;
-      std::unique_lock lock(sleepMutex);
-      std::condition_variable_any().wait_for(lock, stopToken,
-                                             std::chrono::minutes(5), // Fetch weather every 5 minutes
+      std::mutex m;
+      std::unique_lock lock(m);
+      std::condition_variable_any().wait_for(lock, stopToken, std::chrono::minutes(5),
                                              [&stopToken] { return stopToken.stop_requested(); });
     }
   }
 
-  void UpdateTiming() {
-    Uint64 now = SDL_GetPerformanceCounter();
-    Uint64 diff = now - lastPerformanceCounter;
-    lastPerformanceCounter = now;
-    deltaTime = (double)diff / (double)SDL_GetPerformanceFrequency();
-    fps = 1.0 / deltaTime;
-
-    SDL_Delay(16); // Wait for 16ms to maintain 60 FPS
+  std::string FetchAdvice(double temp, int code) {
+    std::string apiKey = Config::GroqApiKey;
+    if (apiKey.empty() || apiKey == "MISSING_KEY") return basicAdvice(temp);
+    try {
+      std::tm tm = localNow();
+      std::string prompt = std::format(
+          "I live in Amsterdam. Today is {}, the time is {:02}:{:02} and the weather is {} ({:.0f}C). "
+          "What should I wear? Answer as one short sentence, continuing the phrase \"You should wear\" "
+          "but WITHOUT the words \"you should wear\" — just the clothing. Do not mention the city, "
+          "time, date or the weather itself.",
+          dateString(tm), tm.tm_hour, tm.tm_min, conditionText(code), temp);
+      json payload = {{"model", "openai/gpt-oss-120b"},
+                      {"max_tokens", 120},
+                      {"temperature", 0.7},
+                      {"messages",
+                       {{{"role", "system"}, {"content", "You give concise, practical clothing advice."}},
+                        {{"role", "user"}, {"content", prompt}}}}};
+      cpr::Response r = cpr::Post(
+          cpr::Url{"https://api.groq.com/openai/v1/chat/completions"}, cpr::Body{payload.dump()},
+          cpr::Header{{"Authorization", std::string("Bearer ") + apiKey}, {"Content-Type", "application/json"}},
+          cpr::Timeout{60000});
+      if (r.status_code == 200) {
+        auto j = json::parse(r.text);
+        std::string out = j.at("choices").at(0).at("message").at("content").get<std::string>();
+        if (out.size() > 1 && out.front() == '"' && out.back() == '"') out = out.substr(1, out.size() - 2);
+        if (!out.empty()) return out;
+      } else {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "LLM fetch failed %ld", r.status_code);
+      }
+    } catch (const std::exception &e) {
+      SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "LLM exception: %s", e.what());
+    }
+    return basicAdvice(temp);
   }
 
-  void UpdateTextures() {
-    SDL_Color white = {255, 255, 255, SDL_ALPHA_OPAQUE};
-    { // Update Background Image
-      std::lock_guard lock(bgImageLoaderMutex);
-      if (pendingBgImage) {
-        bgTexture.reset(SDL_CreateTextureFromSurface(renderer.get(), pendingBgImage.get()));
-        pendingBgImage.reset();
-      }
-    }
-    // Update Date
-    dateLabel.update(renderer.get(), fontNormal.get(), getCurrentDate(), white,
-                     [](float w, float h) { return SDL_FRect{(Config::screen_width - w) / 2.0f, 60.0f, w, h}; });
-    // Update Time
-    timeLabel.update(renderer.get(), fontBig.get(), getCurrentTime(), white, [](float w, float h) {
-      return SDL_FRect{(Config::screen_width - w) / 2.0f, (Config::screen_height - h) / 2.0f - 20.0f, w, h};
-    });
-
-    // Update Weather
-    std::string currentW;
-    {
-      std::lock_guard lock(weatherMutex);
-      currentW = weatherString;
-    }
-    weatherLabel.update(renderer.get(), fontNormal.get(), currentW, white, [&](float w, float h) {
-      float timeBottom = timeLabel.rect.y + timeLabel.rect.h;
-      // If time texture isn't ready yet, guess a position, otherwise use relative
-      float yPos = (timeBottom > 0) ? timeBottom - 80.0f : (Config::screen_height / 2.0f + 140.0f);
-      return SDL_FRect{(Config::screen_width - w) / 2.0f, yPos, w, h};
-    });
-
-    std::string currentAdvice;
-    {
-      std::lock_guard lock(adviceMutex);
-      currentAdvice = adviceString;
-    }
-    int wrapW = static_cast<int>(Config::screen_width * 0.95f);
-    adviceLabel.update(
-        renderer.get(), fontSmall.get(), currentAdvice, white,
-        [&](float w, float h) {
-          float weatherBottom = weatherLabel.rect.y + weatherLabel.rect.h;
-          float yPos = weatherBottom + 10.0f; // 10px padding
-          return SDL_FRect{(Config::screen_width - w) / 2.0f, yPos, w, h};
-        },
-        wrapW);
+  // ------------------------------------------------------------- render --
+  static std::string toUpper(std::string s) {
+    for (char &c : s) c = (char)std::toupper((unsigned char)c);
+    return s;
   }
 
   void Render() {
-    SDL_SetRenderDrawColor(renderer.get(), 0, 0, 0, SDL_ALPHA_OPAQUE);
-    SDL_RenderClear(renderer.get());
+    std::tm tm = localNow();
+    float f = dayFactor(tm);
+    bool isDay = f >= 0.5f;
+    Palette p = mixPalette(f);
 
-    if (bgTexture) {
-      SDL_SetTextureColorMod(bgTexture.get(), 200, 200, 200);
-      RenderTextureCover(bgTexture.get());
+    WeatherState w;
+    {
+      std::scoped_lock lock(weatherMutex);
+      w = weather;
     }
-    // snow.Draw(renderer.get());
-    dateLabel.draw(renderer.get());
-    timeLabel.draw(renderer.get());
-    weatherLabel.draw(renderer.get());
-    adviceLabel.draw(renderer.get());
 
-#ifdef APP_DEBUG
-    SDL_SetRenderDrawColor(renderer.get(), 255, 255, 255, SDL_ALPHA_OPAQUE);
-    SDL_RenderDebugTextFormat(renderer.get(), 10, 10, "FPS: %.2f", fps);
-#endif
+    drawGradient(p.bg0, p.bg1);
+    DrawDate(tm, p);
+    DrawTime(tm, p);
+    DrawWeatherStrip(w, isDay, p);
+    DrawRain(w, p);
 
+    if (shotPath && frameCount + 1 >= shotFrame) {
+      if (SDL_Surface *s = SDL_RenderReadPixels(renderer.get(), nullptr)) {
+        IMG_SavePNG(s, shotPath);
+        SDL_DestroySurface(s);
+      }
+    }
     SDL_RenderPresent(renderer.get());
   }
 
-  // Helper to simulate "CSS object-fit: cover"
-  void RenderTextureCover(SDL_Texture *texture) {
-    float w, h;
-    SDL_GetTextureSize(texture, &w, &h);
-    float scale = std::max((float)Config::screen_width / w, (float)Config::screen_height / h);
-    float newW = w * scale;
-    float newH = h * scale;
-    SDL_FRect dst = {((float)Config::screen_width - newW) / 2.0f, ((float)Config::screen_height - newH) / 2.0f, newW,
-                     newH};
-    SDL_RenderTexture(renderer.get(), texture, nullptr, &dst);
+  void DrawDate(const std::tm &tm, const Palette &p) {
+    lDate.set(renderer.get(), fDate.get(), toUpper(dateString(tm)), 3.2f); // tracked caps
+    // amber dot then date
+    float dotR = 3.6f;
+    float dotX = Config::pad_x;
+    float baseline = Config::date_baseline;
+    fillCircle(dotX + dotR, baseline - lDate.ascent * 0.42f, dotR, p.accent);
+    lDate.draw(renderer.get(), dotX + dotR * 2 + 12.0f, baseline, p.inkDim);
+  }
+
+  void DrawTime(const std::tm &tm, const Palette &p) {
+    lHH.set(renderer.get(), fTime.get(), std::format("{:02}", tm.tm_hour));
+    lMM.set(renderer.get(), fTime.get(), std::format("{:02}", tm.tm_min));
+    lColon.set(renderer.get(), fTime.get(), ":");
+
+    float gap = Config::time_size * 0.02f;
+    float total = lHH.w + gap + lColon.w + gap + lMM.w;
+    float x = (Config::screen_width - total) / 2.0f;
+    float base = Config::time_baseline;
+
+    // gentle colon pulse
+    float ph = (float)(SDL_GetTicks() % 2000) / 2000.0f;
+    float pulse = 0.45f + 0.55f * (0.5f + 0.5f * std::cos(ph * 2.0f * (float)M_PI));
+
+    lHH.drawBase(renderer.get(), x, base, p.ink);
+    x += lHH.w + gap;
+    lColon.drawBase(renderer.get(), x, base - Config::time_size * 0.02f, p.accent, pulse);
+    x += lColon.w + gap;
+    lMM.drawBase(renderer.get(), x, base, p.ink);
+  }
+
+  void DrawWeatherStrip(const WeatherState &w, bool isDay, const Palette &p) {
+    const float B = Config::strip_baseline;
+    std::string tempStr = w.valid ? std::format("{:.0f}", w.temperature) : "--";
+    std::string windStr = w.valid ? std::format("{:.0f}", w.windspeed) : "--";
+    lTempNum.set(renderer.get(), fTempNum.get(), tempStr);
+    lTempUnit.set(renderer.get(), fUnitLg.get(), deg + "C");
+    lWindNum.set(renderer.get(), fWindNum.get(), windStr);
+    lWindUnit.set(renderer.get(), fUnitSm.get(), windUnit);
+
+    // --- temperature cell: [condition icon] NN °C ---
+    float x = Config::pad_x;
+    Icon cond = w.valid ? iconFor(w.weathercode, isDay) : Icon::Cloudy;
+    float tIcon = 40.0f;
+    float numCenter = B - lTempNum.ascent * 0.36f; // rough optical centre of the figures
+    drawIcon(cond, x, numCenter - tIcon / 2.0f, tIcon, p.inkDim);
+    x += tIcon + 16.0f;
+    lTempNum.drawBase(renderer.get(), x, B, p.ink);
+    x += lTempNum.w + 6.0f;
+    lTempUnit.drawBase(renderer.get(), x, B, p.inkDim);
+    x += lTempUnit.w;
+
+    // divider
+    float divTop = B - 34.0f, divBot = B + 6.0f;
+    float d1 = x + 30.0f;
+    fillRect(d1, divTop, 1.0f, divBot - divTop, p.hair);
+
+    // --- wind cell: [wind icon] N m/s ---
+    x = d1 + 30.0f;
+    float wIcon = 27.0f;
+    float wNumCenter = B - lWindNum.ascent * 0.36f;
+    drawIcon(Icon::Wind, x, wNumCenter - wIcon / 2.0f, wIcon, p.inkDim);
+    x += wIcon + 12.0f;
+    lWindNum.drawBase(renderer.get(), x, B, p.ink);
+    x += lWindNum.w + 5.0f;
+    lWindUnit.drawBase(renderer.get(), x, B, p.inkDim);
+    x += lWindUnit.w;
+
+    float d2 = x + 30.0f;
+    fillRect(d2, divTop, 1.0f, divBot - divTop, p.hair);
+
+    // --- advice cell: cursive, right-aligned, fills remaining width ---
+    float adviceRight = Config::screen_width - Config::pad_x;
+    int wrapW = (int)std::clamp(adviceRight - (d2 + 30.0f), 220.0f, 470.0f);
+    lAdvice.set(renderer.get(), fAdvice.get(), w.advice, wrapW);
+    if (lAdvice.tex) {
+      float ax = adviceRight - lAdvice.w;
+      float ay = (numCenter) - lAdvice.h / 2.0f + 4.0f;
+      lAdvice.drawTop(renderer.get(), ax, ay, p.ink);
+    }
+  }
+
+  void DrawRain(const WeatherState &w, const Palette &p) {
+    const float left = Config::pad_x;
+    const float right = Config::screen_width - Config::pad_x;
+    const float CW = right - left;
+
+    bool hasRain = false;
+    float peak = 0;
+    int peakIdx = 0;
+    for (std::size_t i = 0; i < w.rain.size(); ++i) {
+      if (w.rain[i] > peak) {
+        peak = w.rain[i];
+        peakIdx = (int)i;
+      }
+      if (w.rain[i] > 0.05f) hasRain = true;
+    }
+
+    if (!w.valid || !hasRain) {
+      std::string msg = w.valid ? "No rain expected \xC2\xB7 next 2h" : "Checking the sky\xE2\x80\xA6";
+      lRainDry.set(renderer.get(), fRainCap.get(), msg);
+      lRainDry.drawBase(renderer.get(), left + (CW - lRainDry.w) / 2.0f, Config::rain_chart_top + 24.0f, p.inkDim);
+      return;
+    }
+
+    // caption
+    const char *word = peak < 0.3f ? "Light" : (peak < 1.0f ? "Moderate" : "Heavy");
+    int mins = peakIdx * 15;
+    std::string cap = mins <= 0 ? std::format("{} rain{}peak now", word, mdot)
+                                : std::format("{} rain{}peak in {}{} min", word, mdot, approx, mins);
+    lRainCap.set(renderer.get(), fRainCap.get(), cap);
+    lRainCap.drawBase(renderer.get(), left, Config::rain_cap_baseline, p.rain);
+
+    // bars
+    const float chartBottom = Config::rain_chart_top + Config::rain_chart_h;
+    fillRect(left, chartBottom, CW, 1.0f, p.hair);
+    std::size_t n = w.rain.size();
+    if (n == 0) return;
+    const float gap = 6.0f;
+    const float bw = (CW - gap * (n - 1)) / n;
+    const float scale = 2.0f; // mm per 15 min mapped to full height
+    for (std::size_t i = 0; i < n; ++i) {
+      float hh = std::clamp(w.rain[i] / scale, 0.0f, 1.0f) * (Config::rain_chart_h - 1.0f);
+      if (hh < 1.0f) continue;
+      fillRect(left + i * (bw + gap), chartBottom - hh, bw, hh, p.rain);
+    }
+
+    // axis
+    lAxisNow.set(renderer.get(), fAxis.get(), "NOW");
+    lAxisMid.set(renderer.get(), fAxis.get(), "+1H");
+    lAxisEnd.set(renderer.get(), fAxis.get(), "+2H");
+    lAxisNow.drawBase(renderer.get(), left, Config::rain_axis_baseline, p.inkMute);
+    lAxisMid.drawBase(renderer.get(), left + (CW - lAxisMid.w) / 2.0f, Config::rain_axis_baseline, p.inkMute);
+    lAxisEnd.drawBase(renderer.get(), right - lAxisEnd.w, Config::rain_axis_baseline, p.inkMute);
   }
 };
 
-SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
+SDL_AppResult SDL_AppInit(void **appstate, int, char *[]) {
   auto *app = new Clock();
   if (!app->Init()) {
     delete app;
@@ -664,20 +740,15 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   return SDL_APP_CONTINUE;
 }
 
-SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
-  if (event->type == SDL_EVENT_QUIT) {
-    return SDL_APP_SUCCESS;
-  }
+SDL_AppResult SDL_AppEvent(void *, SDL_Event *event) {
+  if (event->type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
+  if (event->type == SDL_EVENT_KEY_DOWN && event->key.scancode == SDL_SCANCODE_ESCAPE) return SDL_APP_SUCCESS;
   return SDL_APP_CONTINUE;
 }
 
-SDL_AppResult SDL_AppIterate(void *appstate) {
-  auto *app = static_cast<Clock *>(appstate);
-  return app->Iterate();
-}
+SDL_AppResult SDL_AppIterate(void *appstate) { return static_cast<Clock *>(appstate)->Iterate(); }
 
-void SDL_AppQuit(void *appstate, SDL_AppResult result) {
-  auto *app = static_cast<Clock *>(appstate);
-  delete app;
+void SDL_AppQuit(void *appstate, SDL_AppResult) {
+  delete static_cast<Clock *>(appstate);
   TTF_Quit();
 }
