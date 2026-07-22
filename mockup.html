@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clock — mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://rsms.me/">
+<!-- Inter from its authoritative source: full OpenType feature set (smcp, onum, frac, calt…),
+     unlike the Google Fonts build which strips them -->
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&family=Dancing+Script:wght@500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=Victor+Mono:ital,wght@1,400;1,500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* dark (night) — deep blue ink, warm amber accent, cool rain-blue */
+    --bg-0: #0d141d;
+    --bg-1: #0a0f16;
+    --ink:      #eef3f9;
+    --ink-dim:  #7d8aa0;
+    --ink-mute: #4d5769;
+    --hair:     rgba(255,255,255,.09);
+    --accent:   #f0b65e;
+    --glow:     rgba(240,182,94,.10);
+    --rain:     #6fb1e3;
+    --rain-soft: rgba(111,177,227,.14);
+    /* cursive for the "human voice" lines — the editor-comment register */
+    --script:       "Victor Mono", monospace;
+    --script-style: italic;
+    --script-weight: 500;
+  }
+  .screen[data-theme="light"] {
+    /* day — cool clean off-white, ink text */
+    --bg-0: #eef1f5;
+    --bg-1: #e4e8ee;
+    --ink:      #121821;
+    --ink-dim:  #566274;
+    --ink-mute: #97a1b0;
+    --hair:     rgba(18,24,33,.12);
+    --accent:   #c17d1c;
+    --glow:     rgba(193,125,28,.08);
+    --rain:     #2f7fc4;
+    --rain-soft: rgba(47,127,196,.12);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: #17181c;
+    font-family: "InterVariable", "Inter", system-ui, sans-serif;
+    padding: 24px;
+    /* real type: kerning + ligatures on everywhere, not the browser default off */
+    font-kerning: normal;
+    font-variant-ligatures: common-ligatures contextual;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* target device: RPi 1024x600 touchscreen */
+  .device {
+    width: 1024px;
+    height: 600px;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04);
+    position: relative;
+  }
+
+  .screen {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(120% 80% at 50% 12%, var(--glow), transparent 60%),
+      linear-gradient(160deg, var(--bg-0), var(--bg-1));
+    color: var(--ink);
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    padding: 34px 56px 26px;
+    transition: background .5s ease, color .5s ease;
+  }
+
+  /* ---- top: date eyebrow ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .date {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    /* true small caps + oldstyle figures — the classic editorial eyebrow,
+       not faux text-transform:uppercase */
+    text-transform: none;
+    font-variant-caps: all-small-caps;
+    font-variant-numeric: oldstyle-nums proportional-nums;
+    color: var(--ink-dim);
+  }
+  .date .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+  }
+  .place {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-mute);
+  }
+
+  /* ---- center: hero time ---- */
+  .hero {
+    display: grid;
+    place-items: center;
+  }
+  .time {
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 500;              /* heavier for legibility across the room */
+    font-size: 296px;
+    line-height: .8;
+    letter-spacing: -.01em;
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: baseline;
+    color: var(--ink);
+  }
+  .time .colon {
+    color: var(--accent);
+    font-weight: 500;
+    margin: 0 .04em;
+    transform: translateY(-.02em);
+    animation: blink 2s steps(1) infinite;
+  }
+  @keyframes blink { 0%,50% { opacity: 1 } 50.01%,100% { opacity: .28 } }
+
+  /* ---- footer: weather strip + rain nowcast ---- */
+  .footer { display: flex; flex-direction: column; gap: 18px; }
+
+  .weather {
+    display: flex;
+    align-items: stretch;
+  }
+  .cell {
+    display: flex;
+    align-items: center;
+    padding: 0 30px;
+    color: var(--ink-dim);
+    font-size: 25px;
+    font-weight: 400;
+    letter-spacing: .01em;
+  }
+  .cell:first-child { padding-left: 0; }
+  .cell + .cell { border-left: 1px solid var(--hair); }
+  .cell.now { gap: 16px; }
+  .cell.wind { gap: 12px; }
+
+  /* a measured value: figure + unit sharing a baseline, unit set smaller & tracked */
+  .metric { display: inline-flex; align-items: baseline; }
+  .num {
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 400;
+    line-height: 1;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .unit {
+    margin-left: .22em;              /* the thin space, scaled to the unit */
+    font-family: "InterVariable", "Inter", sans-serif;
+    font-weight: 500;
+    letter-spacing: .015em;
+    color: var(--ink-dim);
+  }
+  .cell.now  .num  { font-size: 46px; }
+  .cell.now  .unit { font-size: 22px; }
+  .cell.wind .num  { font-size: 30px; }
+  .cell.wind .unit { font-size: 16px; }
+  /* line icons stand in for the condition word and the wind descriptor */
+  .wx-icon { color: var(--ink-dim); flex: none; display: block; }
+  .cell.now .wx-icon  { width: 40px; height: 40px; }
+  .cell.wind .wx-icon { width: 27px; height: 27px; }
+  /* dressing advice — the one actionable line, gets the room and the emphasis */
+  .cell.advice {
+    flex: 1;
+    justify-content: flex-end;
+    text-align: right;
+    color: var(--ink);
+    padding-right: 0;
+  }
+
+  /* the "human voice" register: cursive, like an editor's italic comment */
+  .script {
+    font-family: var(--script);
+    font-style: var(--script-style);
+    font-weight: var(--script-weight);
+  }
+  .cell.advice.script { font-size: 33px; letter-spacing: 0; }
+
+  /* ---- rain nowcast (Buienradar-style) ---- */
+  .rain { display: flex; flex-direction: column; gap: 6px; min-height: 74px; justify-content: center; }
+  .rain-cap {
+    font-size: 20px;
+    font-weight: 500;
+    color: var(--rain);
+    letter-spacing: .01em;
+  }
+  .rain-cap.script { font-size: 21px; }
+  .rain-chart { width: 100%; height: 46px; display: block; }
+  .rain-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-mute);
+  }
+  /* dry: a single quiet line holding the same footprint */
+  .rain-empty {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--ink-dim);
+    letter-spacing: .02em;
+  }
+  .rain[data-state="dry"] .rain-cap,
+  .rain[data-state="dry"] .rain-chart,
+  .rain[data-state="dry"] .rain-axis { display: none; }
+  .rain[data-state="wet"] .rain-empty { display: none; }
+
+  /* mockup-only theme toggle */
+  .toggle {
+    position: fixed;
+    top: 20px; right: 24px;
+    font: 500 13px/1 "Inter", sans-serif;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #aab3c2;
+    background: #23252b;
+    border: 1px solid #33363e;
+    border-radius: 999px;
+    padding: 9px 16px;
+    cursor: pointer;
+  }
+  .toggle:hover { color: #fff; border-color: #4a4e58; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .time .colon { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <button class="toggle" id="toggle">Day / Night</button>
+
+  <div class="device">
+    <div class="screen" data-theme="dark" id="screen">
+      <header class="topbar">
+        <div class="date"><span class="dot"></span><span id="date">Thursday, 18 June 2026</span></div>
+      </header>
+
+      <main class="hero">
+        <div class="time">
+          <span id="hh">23</span><span class="colon">:</span><span id="mm">19</span>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <div class="weather">
+          <div class="cell now">
+            <svg class="wx-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-label="Cloudy">
+              <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            </svg>
+            <span class="metric"><span class="num">24</span><span class="unit">&deg;C</span></span>
+          </div>
+          <div class="cell wind">
+            <svg class="wx-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-label="Wind">
+              <path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/>
+            </svg>
+            <span class="metric"><span class="num">2</span><span class="unit">m&frasl;s</span></span>
+          </div>
+          <div class="cell advice script">Light jacket, umbrella handy</div>
+        </div>
+
+        <div class="rain" id="rain" data-state="wet">
+          <div class="rain-cap script" id="rain-cap">Light shower &middot; peak in &asymp;40&#8239;min</div>
+          <svg class="rain-chart" id="rain-chart" viewBox="0 0 960 46" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <div class="rain-axis"><span>Now</span><span>+1h</span><span>+2h</span></div>
+          <div class="rain-empty">No rain expected · next 2h</div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+<script>
+  const pad = n => String(n).padStart(2, "0");
+
+  // Set true to follow the real clock; false keeps the mocked 23:19 sample.
+  const LIVE = false;
+  (function time(){
+    const d = new Date();
+    const hh = LIVE ? d.getHours() : 23;
+    const mm = LIVE ? d.getMinutes() : 19;
+    document.getElementById("hh").textContent = pad(hh);
+    document.getElementById("mm").textContent = pad(mm);
+    if (LIVE) setTimeout(time, 1000);
+  })();
+
+  // --- Rain nowcast: 24 samples over 2h (5-min steps), mm per step ---
+  // In the real app these come from Open-Meteo `minutely_15=precipitation`.
+  const rain = [0,0,0,0.05,0.12,0.25,0.40,0.55,0.68,0.72,0.65,0.50,
+                0.38,0.28,0.32,0.40,0.30,0.18,0.10,0.05,0.02,0,0,0];
+
+  (function drawRain(){
+    const svg = document.getElementById("rain-chart");
+    const W = 960, H = 46, base = H - 1;
+    const n = rain.length, gap = 3, bw = (W - gap*(n-1)) / n;
+    const scale = 0.8; // mm mapped to full height
+    const NS = "http://www.w3.org/2000/svg";
+
+    // faint baseline
+    const bl = document.createElementNS(NS, "line");
+    bl.setAttribute("x1", 0); bl.setAttribute("x2", W);
+    bl.setAttribute("y1", base); bl.setAttribute("y2", base);
+    bl.setAttribute("stroke", "var(--hair)"); bl.setAttribute("stroke-width", 1);
+    svg.appendChild(bl);
+
+    // soft area under the bars for a connected feel
+    let d = `M 0 ${base}`;
+    rain.forEach((v,i) => {
+      const x = i*(bw+gap) + bw/2;
+      const y = base - Math.min(v/scale,1)*(base-2);
+      d += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+    });
+    d += ` L ${W} ${base} Z`;
+    const area = document.createElementNS(NS, "path");
+    area.setAttribute("d", d);
+    area.setAttribute("fill", "var(--rain-soft)");
+    svg.appendChild(area);
+
+    // bars
+    rain.forEach((v,i) => {
+      const h = Math.min(v/scale,1)*(base-2);
+      if (h < 0.5) return;
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", (i*(bw+gap)).toFixed(1));
+      r.setAttribute("y", (base - h).toFixed(1));
+      r.setAttribute("width", bw.toFixed(1));
+      r.setAttribute("height", h.toFixed(1));
+      r.setAttribute("rx", Math.min(bw/2, 2.5));
+      r.setAttribute("fill", "var(--rain)");
+      svg.appendChild(r);
+    });
+  })();
+
+  document.getElementById("toggle").addEventListener("click", () => {
+    const s = document.getElementById("screen");
+    s.dataset.theme = s.dataset.theme === "dark" ? "light" : "dark";
+  });
+</script>
+</body>
+</html>
