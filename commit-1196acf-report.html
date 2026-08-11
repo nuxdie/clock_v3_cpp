@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>main.cpp changes — commit 1196acf</title>
+<style>
+  :root {
+    --bg: #0d141d;
+    --panel: #111a24;
+    --ink: #eef3f9;
+    --ink-dim: #a7b4c6;
+    --ink-mute: #6d7a8c;
+    --accent: #f0b65e;
+    --rain: #6fb1e3;
+    --hair: rgba(255,255,255,.10);
+    --code-bg: #0a1017;
+    --code-ink: #d7e1ee;
+    --kw: #f0b65e;
+    --str: #86c98f;
+    --com: #6d7a8c;
+    --max: 860px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eef1f5;
+      --panel: #ffffff;
+      --ink: #121821;
+      --ink-dim: #46566a;
+      --ink-mute: #8794a6;
+      --accent: #b6771c;
+      --rain: #2f7fc4;
+      --hair: rgba(18,24,33,.12);
+      --code-bg: #0f1620;
+      --code-ink: #d7e1ee;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d141d; --panel: #111a24; --ink: #eef3f9; --ink-dim: #a7b4c6;
+    --ink-mute: #6d7a8c; --hair: rgba(255,255,255,.10); --accent:#f0b65e; --rain:#6fb1e3;
+  }
+  :root[data-theme="light"] {
+    --bg: #eef1f5; --panel:#ffffff; --ink:#121821; --ink-dim:#46566a;
+    --ink-mute:#8794a6; --hair: rgba(18,24,33,.12); --accent:#b6771c; --rain:#2f7fc4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 48px 24px 96px; }
+  header.doc {
+    border-bottom: 1px solid var(--hair);
+    padding-bottom: 28px;
+    margin-bottom: 12px;
+  }
+  .eyebrow {
+    font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 12px;
+  }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 16px; letter-spacing: -.01em; }
+  h1 code { font-size: .82em; background: var(--code-bg); color: var(--code-ink);
+            padding: 2px 8px; border-radius: 6px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--ink-dim); font-size: 14px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  h2 {
+    font-size: 22px; margin: 52px 0 4px; letter-spacing: -.01em;
+    padding-top: 8px; scroll-margin-top: 20px;
+  }
+  h2 .num {
+    display: inline-block; color: var(--accent); font-variant-numeric: tabular-nums;
+    margin-right: 10px; font-weight: 700;
+  }
+  h3 { font-size: 17px; margin: 30px 0 4px; color: var(--ink); }
+  p { color: var(--ink-dim); margin: 14px 0; }
+  p, li { color: var(--ink-dim); }
+  strong, b { color: var(--ink); font-weight: 650; }
+  a { color: var(--rain); }
+  ul { margin: 14px 0; padding-left: 22px; }
+  li { margin: 7px 0; }
+  code {
+    font-family: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: .9em; background: var(--code-bg); color: var(--code-ink);
+    padding: 1.5px 6px; border-radius: 5px; border: 1px solid var(--hair);
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--hair); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; margin: 18px 0;
+    box-shadow: 0 1px 0 rgba(0,0,0,.2);
+  }
+  pre code { background: none; border: none; padding: 0; color: var(--code-ink);
+             font-size: 13px; line-height: 1.6; }
+  .tok-com { color: var(--com); font-style: italic; }
+  .tok-kw  { color: var(--kw); }
+  .tok-str { color: var(--str); }
+  blockquote {
+    margin: 18px 0; padding: 2px 18px; border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 0 8px 8px 0;
+  }
+  blockquote p { color: var(--ink); margin: 12px 0; }
+  .callout {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 10px;
+    padding: 4px 20px; margin: 22px 0;
+  }
+  .callout .tag {
+    display: inline-block; font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    font-weight: 700; color: var(--accent); margin-top: 16px;
+  }
+  .callout.gotcha .tag { color: #e8886f; }
+  table {
+    width: 100%; border-collapse: collapse; margin: 22px 0; font-size: 14px;
+    display: block; overflow-x: auto;
+  }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--hair);
+           vertical-align: top; }
+  th { color: var(--ink); font-weight: 650; border-bottom: 2px solid var(--hair);
+       white-space: nowrap; }
+  td { color: var(--ink-dim); }
+  td:first-child { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  .toc {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 12px;
+    padding: 20px 24px; margin: 32px 0;
+  }
+  .toc h4 { margin: 0 0 12px; font-size: 12px; letter-spacing: .14em;
+            text-transform: uppercase; color: var(--ink-mute); }
+  .toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+  .toc li { margin: 5px 0; break-inside: avoid; }
+  .toc a { color: var(--ink-dim); text-decoration: none; }
+  .toc a:hover { color: var(--rain); text-decoration: underline; }
+  hr { border: none; border-top: 1px solid var(--hair); margin: 40px 0; }
+  .lede { font-size: 17px; color: var(--ink); }
+  @media (max-width: 620px) { .toc ol { columns: 1; } h1 { font-size: 24px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <p class="eyebrow">Code change report · geared for a C++ newcomer</p>
+  <h1>What changed in <code>main.cpp</code> at commit <code>1196acf</code></h1>
+  <div class="meta">
+    <span><b>Commit</b> 1196acf1 — "Refactor code structure for improved readability and maintainability"</span>
+    <span><b>Author</b> WiegerWolf</span>
+    <span><b>Date</b> Wed 22 Jul 2026</span>
+    <span><b>Version</b> 0.2.1 → 0.3.0</span>
+    <span><b>Diff</b> main.cpp ~1071 lines touched</span>
+  </div>
+</header>
+
+<p class="lede">Despite the modest commit message, this is a <strong>ground-up rewrite of the visual layer</strong>. The old app was a photo-background clock with falling snow and a Russian weather line. The new app is a flat, theme-aware "modern layout" clock with a hand-drawn weather strip and a rain forecast chart. This report walks through it feature by feature, explaining the C++ patterns and the traps for each.</p>
+
+<div class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#s1">The big picture: deleted vs added</a></li>
+    <li><a href="#s2">Include-list changes</a></li>
+    <li><a href="#s3">Config: font sizes → layout system</a></li>
+    <li><a href="#s4">The color system</a></li>
+    <li><a href="#s5">Weather logic: map → switch</a></li>
+    <li><a href="#s6"><code>parseTs</code> &amp; C-string date parsing</a></li>
+    <li><a href="#s7">Text rendering: Label &amp; TrackedLabel</a></li>
+    <li><a href="#s8">Font &amp; icon loading</a></li>
+    <li><a href="#s9">A simpler threading model</a></li>
+    <li><a href="#s10">Drawing primitives</a></li>
+    <li><a href="#s11">Render split into draw methods</a></li>
+    <li><a href="#s12">Screenshot mode &amp; main loop</a></li>
+    <li><a href="#summary">Summary table</a></li>
+  </ol>
+</div>
+
+<h2 id="s1"><span class="num">1</span>The big picture: what was deleted vs. added</h2>
+<p><strong>Removed entirely:</strong></p>
+<ul>
+  <li><code>SnowSystem</code> class (~130 lines) — a parallelized particle system.</li>
+  <li>Bing background-image downloading (<code>FetchBackgroundImage</code>, <code>RenderTextureCover</code>, the "object-fit: cover" logic).</li>
+  <li>The <code>BingImage</code>, <code>CurrentWeather</code>, <code>WeatherData</code>, <code>LlmMessage</code>, <code>LlmChoice</code>, <code>LlmResponse</code> structs.</li>
+  <li>The Russian weather vocabulary (<code>WEATHER_CODE_RU</code>, <code>getWindspeedType</code>, Russian <code>weekdays</code>/<code>months</code>).</li>
+  <li>FPS / frame-timing machinery (<code>UpdateTiming</code>, <code>deltaTime</code>, <code>fps</code>).</li>
+</ul>
+<p><strong>Added:</strong></p>
+<ul>
+  <li>A <strong>color/theme system</strong> (<code>Col</code>, <code>Palette</code>, <code>mix</code>, <code>mixPalette</code>, <code>dayFactor</code>) that crossfades between a dark "night" theme and a light "day" theme.</li>
+  <li>Weather <strong>icons</strong> (PNG assets) and an <code>Icon</code> enum.</li>
+  <li>Two text-rendering helpers: <code>Label</code> (cached text texture) and <code>TrackedLabel</code> (per-glyph rendering for letter-spacing).</li>
+  <li>A <strong>rain forecast bar chart</strong> (<code>DrawRain</code>) fed by Open-Meteo's <code>minutely_15</code> precipitation data.</li>
+  <li>A <strong>screenshot mode</strong> (<code>APP_SHOT</code> env var) for headless verification.</li>
+</ul>
+<p>The header swap is the tell: <code>font_data.h</code> → <code>assets_fonts.h</code> + <code>assets_icons.h</code>.</p>
+
+<h2 id="s2"><span class="num">2</span>Include list changes — and what they tell you</h2>
+<pre><code><span class="tok-kw">#include</span> &lt;cstdio&gt;     <span class="tok-com">// for std::sscanf</span>
+ <span class="tok-kw">#include</span> &lt;ctime&gt;
+-<span class="tok-kw">#include</span> &lt;execution&gt;  <span class="tok-com">// std::execution::par_unseq (parallel snow update)</span>
+-<span class="tok-kw">#include</span> &lt;functional&gt; <span class="tok-com">// std::function (the old layout callbacks)</span>
+-<span class="tok-kw">#include</span> &lt;map&gt;        <span class="tok-com">// std::map (Russian weather table)</span>
+-<span class="tok-kw">#include</span> &lt;numbers&gt;    <span class="tok-com">// std::numbers::pi (snow sway)</span>
+-<span class="tok-kw">#include</span> &lt;random&gt;     <span class="tok-com">// std::mt19937 (snowflake randomness)</span>
+-<span class="tok-kw">#include</span> &lt;ranges&gt;     <span class="tok-com">// std::views::iota (snow index loop)</span></code></pre>
+<div class="callout">
+  <span class="tag">Learning point</span>
+  <p>Include the headers you use, and remove the ones you don't. Every deleted include here is a fingerprint of a deleted feature: <code>&lt;execution&gt;</code>, <code>&lt;random&gt;</code>, <code>&lt;numbers&gt;</code>, <code>&lt;ranges&gt;</code> all vanished with the snow; <code>&lt;map&gt;</code> with the Russian lookup; <code>&lt;functional&gt;</code> with the <code>std::function</code> layout callbacks. <code>using namespace std::string_literals;</code> was dropped too — the new code has no <code>"…"s</code> literals.</p>
+</div>
+
+<h2 id="s3"><span class="num">3</span>Configuration: from font sizes to a layout system</h2>
+<p>Old <code>Config</code> had <code>font_big_size</code>, <code>font_normal_size</code>, <code>num_snowflakes</code>. New <code>Config</code> replaces them with a block of <strong>layout constants in logical pixels</strong>:</p>
+<pre><code><span class="tok-kw">constexpr</span> <span class="tok-kw">float</span> pad_x = <span class="tok-str">56.0f</span>;
+<span class="tok-kw">constexpr</span> <span class="tok-kw">float</span> date_baseline = <span class="tok-str">84.0f</span>;
+<span class="tok-kw">constexpr</span> <span class="tok-kw">float</span> time_baseline = <span class="tok-str">362.0f</span>;
+<span class="tok-com">// ...</span></code></pre>
+<p><strong>Pattern — <code>constexpr</code>:</strong> compile-time constants baked into the binary, with no runtime cost and no global mutable state. This is the modern, type-safe replacement for <code>#define</code>, and it respects scope (it lives in <code>namespace Config</code>).</p>
+<p><strong>Why <code>float</code> not <code>int</code>?</strong> The new rendering uses <code>SDL_FRect</code> (float rectangles) everywhere and does sub-pixel positioning like <code>baseline - ascent * 0.42f</code>. Keeping layout math in float avoids scattering <code>(float)</code> casts.</p>
+
+<h2 id="s4"><span class="num">4</span>The color system — <code>constexpr</code> functions and aggregate structs</h2>
+<p>This is the most "new C++" part of the commit. Read it slowly.</p>
+<pre><code><span class="tok-kw">struct</span> Col {
+  <span class="tok-kw">float</span> r = <span class="tok-str">0</span>, g = <span class="tok-str">0</span>, b = <span class="tok-str">0</span>, a = <span class="tok-str">255</span>; <span class="tok-com">// 0..255, kept as float for cheap mixing</span>
+};
+<span class="tok-kw">constexpr</span> Col mix(<span class="tok-kw">const</span> Col &amp;a, <span class="tok-kw">const</span> Col &amp;b, <span class="tok-kw">float</span> t) {
+  <span class="tok-kw">return</span> {a.r + (b.r - a.r) * t, <span class="tok-com">/* ... */</span>};
+}</code></pre>
+<ul>
+  <li><strong>Default member initializers</strong> (<code>float r = 0, …</code>): every <code>Col</code> is fully defined even as <code>Col c;</code>. No uninitialized-memory bugs.</li>
+  <li><strong>Aggregate / brace initialization:</strong> <code>return {…};</code> builds a <code>Col</code> without naming the type. <code>Col{13, 20, 29}</code> fills <code>r,g,b</code> and leaves <code>a</code> at its default 255 — that's why the palette tables read so compactly.</li>
+  <li><strong><code>constexpr</code> function:</strong> <code>mix</code> can run at compile time, so <code>constexpr Palette kDark{…}</code> exists in the binary with zero startup cost.</li>
+  <li><strong>Linear interpolation ("lerp"):</strong> <code>a + (b - a) * t</code> — <code>t=0</code> gives <code>a</code>, <code>t=1</code> gives <code>b</code>. Used for individual colors and, one level up, for whole palettes in <code>mixPalette</code>.</li>
+</ul>
+<div class="callout gotcha">
+  <span class="tag">Gotcha</span>
+  <p>Colors are stored as float <strong>0–255</strong>, not the 0.0–1.0 that graphics code often uses. That's why you later see <code>(Uint8)c.r</code> casts when handing colors to SDL, and <code>c.r / 255.f</code> conversions when SDL wants normalized floats (<code>SDL_FColor</code> in <code>fillCircle</code>/<code>drawGradient</code>). Mixing the two conventions is a classic "why is everything black / washed out" bug. The code converts correctly at each SDL boundary — but it's easy to break later.</p>
+</div>
+<p><strong><code>dayFactor</code></strong> returns 0 at night, 1 in daytime, and a linear ramp during 07:00–08:00 and 18:00–19:00. That one float drives the whole theme crossfade via <code>mixPalette(f)</code>. Clean separation: one function decides "how much day is it," another decides "what do colors look like at that amount of day."</p>
+
+<h2 id="s5"><span class="num">5</span>Weather logic rewritten: <code>std::map</code> → <code>switch</code></h2>
+<p>Old code looked up weather descriptions in a <code>std::map&lt;int, std::string_view&gt;</code>. New code uses plain <code>switch</code> statements (<code>iconFor</code>, <code>conditionText</code>), and the language changed from Russian to English.</p>
+<p><strong>Why is this an improvement?</strong></p>
+<ul>
+  <li>A <code>std::map</code> allocates nodes on the heap and does an O(log n) tree lookup. A <code>switch</code> over integers compiles to a jump table — faster, no allocation, values live in code rather than a runtime-built container.</li>
+  <li><code>iconFor</code> collapses many WMO codes into a small <code>Icon</code> enum (all snow codes → <code>Icon::Snow</code>), with a <code>default:</code> arm handling "everything else is rain."</li>
+</ul>
+<p><strong><code>enum class Icon</code></strong> is a <em>scoped</em> enum — you must write <code>Icon::Snow</code>, never bare <code>Snow</code>. That blocks name collisions and accidental int conversions.</p>
+<div class="callout">
+  <span class="tag">The COUNT trick</span>
+  <p><code>enum class Icon { ClearDay, …, COUNT };</code> — because values auto-number from 0, <code>COUNT</code> equals the number of real entries, so <code>std::array&lt;TexturePtr, (std::size_t)Icon::COUNT&gt;</code> sizes an array to exactly one slot per icon. It only works if <code>COUNT</code> stays last and nobody assigns explicit values — add a new icon <em>before</em> <code>COUNT</code> and everything resizes automatically.</p>
+</div>
+
+<h2 id="s6"><span class="num">6</span><code>parseTs</code> and manual C-string parsing</h2>
+<pre><code><span class="tok-kw">std::time_t</span> parseTs(<span class="tok-kw">const</span> std::string &amp;s) {
+  <span class="tok-kw">std::tm</span> tm{};
+  <span class="tok-kw">int</span> Y, M, D, h, mi;
+  <span class="tok-kw">if</span> (std::sscanf(s.c_str(), <span class="tok-str">"%d-%d-%dT%d:%d"</span>, &amp;Y, &amp;M, &amp;D, &amp;h, &amp;mi) != <span class="tok-str">5</span>) <span class="tok-kw">return</span> <span class="tok-str">0</span>;
+  tm.tm_year = Y - <span class="tok-str">1900</span>;
+  tm.tm_mon  = M - <span class="tok-str">1</span>;
+  <span class="tok-com">/* ... */</span>
+  tm.tm_isdst = -<span class="tok-str">1</span>;
+  <span class="tok-kw">return</span> std::mktime(&amp;tm);
+}</code></pre>
+<p>This parses an ISO timestamp like <code>2026-07-24T13:45</code> into a <code>time_t</code>. A pile of classic C date traps — all handled correctly:</p>
+<ul>
+  <li><strong><code>std::tm tm{}</code></strong> — the <code>{}</code> zero-initializes the struct. Skip it and fields like <code>tm_sec</code> hold garbage that <code>mktime</code> will happily use.</li>
+  <li><strong><code>tm_year</code> is "years since 1900"</strong> and <strong><code>tm_mon</code> is 0-based</strong> (0 = January). Hence <code>Y - 1900</code> and <code>M - 1</code> — the #1 date bug in C.</li>
+  <li><strong><code>tm_isdst = -1</code></strong> tells <code>mktime</code> "I don't know if DST applies; figure it out." Hard-coding 0 or 1 shifts your time by an hour half the year.</li>
+  <li><strong><code>sscanf</code> return check:</strong> <code>!= 5</code> means "did all five fields parse?" If not it returns 0 instead of a garbage time — the safe way to use the error-prone <code>sscanf</code>.</li>
+</ul>
+<p>It exists so <code>FetchWeather</code> can skip precipitation buckets already in the past (<code>… &lt; now - 450</code>, i.e. within the last 7.5 minutes).</p>
+
+<h2 id="s7"><span class="num">7</span>Text rendering: <code>Label</code> and <code>TrackedLabel</code></h2>
+<p>This replaces the old inner <code>TextLabel</code> struct. Understanding <em>why</em> it changed is the heart of the "readability/maintainability" claim.</p>
+
+<h3>The old approach (<code>TextLabel</code>)</h3>
+<p>Each label bundled <strong>text + texture + a <code>std::function&lt;SDL_FRect(w,h)&gt;</code> layout callback</strong>. Every frame, <code>UpdateTextures()</code> recomputed positions by calling those lambdas, chaining them (<code>weatherBottom = weatherLabel.rect.y + …</code>), and baked a black drop-shadow into every draw. Problems:</p>
+<ul>
+  <li><strong><code>std::function</code> is a heavyweight, type-erased wrapper</strong> — it can heap-allocate and adds an indirect call per label. Overkill when layout is fixed.</li>
+  <li>Positions were <strong>relative to each other</strong>, so one label's size affected the next's — fragile chaining.</li>
+  <li>Color was fixed white + shadow; you couldn't cheaply re-tint for a theme.</li>
+</ul>
+
+<h3>The new <code>Label</code></h3>
+<pre><code><span class="tok-kw">struct</span> Label {
+  TexturePtr tex;  <span class="tok-kw">float</span> w = <span class="tok-str">0</span>, h = <span class="tok-str">0</span>;  <span class="tok-kw">int</span> ascent = <span class="tok-str">0</span>;
+  std::string cache;  <span class="tok-kw">int</span> wrapCache = -<span class="tok-str">1</span>;
+
+  <span class="tok-kw">void</span> set(SDL_Renderer *r, TTF_Font *f, <span class="tok-kw">const</span> std::string &amp;s, <span class="tok-kw">int</span> wrap = <span class="tok-str">0</span>) {
+    <span class="tok-kw">if</span> (s == cache &amp;&amp; tex &amp;&amp; wrap == wrapCache) <span class="tok-kw">return</span>; <span class="tok-com">// ← skip if unchanged</span>
+    <span class="tok-com">/* ... render white texture ... */</span>
+  }
+  <span class="tok-kw">void</span> drawTop(<span class="tok-com">/*...*/</span>)   <span class="tok-com">// draw at top-left</span>
+  <span class="tok-kw">void</span> drawBase(<span class="tok-com">/*...*/</span>)  <span class="tok-com">// draw so the *baseline* lands at baselineY</span>
+};</code></pre>
+<ul>
+  <li><strong>Render white once, tint at draw time.</strong> The texture is always white; color/alpha are applied via <code>SDL_SetTextureColorMod</code> / <code>SDL_SetTextureAlphaMod</code> when drawing. A theme crossfade or a blinking colon then costs <em>nothing</em> — no re-rasterizing glyphs. That's why the old baked-in shadow had to go.</li>
+  <li><strong>The cache guard</strong> lets <code>set()</code> be called every frame but only rasterize when the string actually changes. The clock only re-rasterizes when the minute ticks.</li>
+  <li><strong>Baseline-aware drawing.</strong> <code>drawBase</code> places text so the typographic baseline sits at a given Y using <code>TTF_GetFontAscent</code> — how the temperature number and its <code>°C</code> unit (different sizes) share one baseline. You position by baseline, not by the top of the box.</li>
+  <li><strong>RAII smart pointers</strong> (<code>TexturePtr</code>, <code>SurfacePtr</code>): the SDL texture frees automatically on destruction/reset. No manual <code>SDL_DestroyTexture</code>.</li>
+</ul>
+
+<h3><code>TrackedLabel</code> — solving a real limitation</h3>
+<blockquote><p>// Per-glyph rendered run so we can apply letter tracking (SDL_ttf has none).</p></blockquote>
+<p>SDL_ttf can't do letter-spacing. So this renders <strong>each character to its own little texture</strong> and lays them out with a configurable <code>tracking</code> gap. Used only for the spaced-out uppercase date header. Newbie-relevant details:</p>
+<ul>
+  <li><strong>UTF-8 handling</strong> (<code>utf8Len</code>): a UTF-8 character is 1–4 bytes; <code>utf8Len</code> inspects the lead byte's high bits to decide how many to grab (<code>s.substr(i, n)</code>). Treating one byte as one character is a very common bug this avoids.</li>
+  <li><strong><code>std::move(g)</code></strong> when pushing into the vector: <code>G</code> owns a move-only <code>TexturePtr</code>, so you must move, not copy. Forgetting it fails to compile — the language protecting you.</li>
+  <li><strong>Spaces have no pixels:</strong> <code>TTF_RenderText_Blended</code> returns a zero-width surface for a space, so the <code>else</code> branch falls back to <code>TTF_GetStringSize</code> just for the advance width — or spaces would collapse.</li>
+  <li><strong><code>totalW = x &gt; 0 ? x - tracking : 0;</code></strong> — tracking is added after every glyph, so the last one over-counts by one gap; this subtracts it back. A subtle off-by-one.</li>
+</ul>
+
+<h2 id="s8"><span class="num">8</span>Font &amp; icon loading — lambdas and DIY typography</h2>
+<pre><code><span class="tok-kw">auto</span> open = [](<span class="tok-kw">const</span> <span class="tok-kw">unsigned char</span> *data, <span class="tok-kw">unsigned int</span> len, <span class="tok-kw">float</span> size) {
+  <span class="tok-kw">return</span> FontPtr(TTF_OpenFontIO(SDL_IOFromConstMem(data, len), <span class="tok-kw">true</span>, size));
+};
+fTime    = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, Config::time_size);
+fTempNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, <span class="tok-str">46.0f</span>);</code></pre>
+<ul>
+  <li><strong>Local lambda to kill repetition.</strong> The old code repeated the full open-from-memory incantation three times; the lambda names it once. Nine fonts are opened from three embedded typefaces (Space Grotesk, Inter, Victor Mono) at various sizes.</li>
+  <li><strong>The <code>true</code> argument</strong> means "close the IO stream automatically" — a resource detail easy to get wrong by hand.</li>
+  <li><strong>Fonts are embedded in the binary</strong> (byte arrays in <code>assets_fonts.h</code>), loaded from memory not a file — so the app needs no font files at runtime (relevant to the Raspberry-Pi deploy).</li>
+</ul>
+<p><strong>Glyph feature-detection:</strong></p>
+<pre><code>windUnit = TTF_FontHasGlyph(fUnitSm.get(), <span class="tok-str">0x2044</span>) ? <span class="tok-str">"m\xE2\x81\x84s"</span> : <span class="tok-str">"m/s"</span>; <span class="tok-com">// m⁄s</span>
+approx   = TTF_FontHasGlyph(fRainCap.get(), <span class="tok-str">0x2248</span>) ? <span class="tok-str">"\xE2\x89\x88"</span>   : <span class="tok-str">"~"</span>;   <span class="tok-com">// ≈</span></code></pre>
+<p>It asks the font "do you have the fraction-slash / the ≈ glyph?" and uses the pretty character if so, else an ASCII fallback. The <code>"\xE2\x81\x84"</code> is the <strong>UTF-8 byte encoding</strong> of U+2044 written as an escaped literal — a portable way to embed a Unicode character regardless of the source file's encoding.</p>
+
+<h2 id="s9"><span class="num">9</span>The threading model got simpler</h2>
+<p><strong>Deleted:</strong> the entire background-image thread and its <code>condition_variable</code> sleep dance, plus two mutexes (<code>bgImageLoaderMutex</code>, <code>adviceMutex</code>). <strong>Now:</strong> one <code>std::jthread weatherLoaderThread</code> and one <code>std::mutex weatherMutex</code> guarding a single <code>WeatherState</code> struct.</p>
+<ul>
+  <li><strong><code>std::jthread</code></strong> (C++20) is a "joining thread": its destructor auto-requests a stop and joins. The <code>std::stop_token</code> parameter is how the loop exits (<code>while (!stopToken.stop_requested())</code>).</li>
+  <li><strong>Single struct behind one mutex.</strong> Old code held weather and advice in two separately-locked strings updated at different times — a window for inconsistency. New code fills a local <code>WeatherState</code>, then does <em>one</em> <code>std::scoped_lock</code> and assigns the whole struct. Either you see the complete new weather+advice, or the old — never a mix. This is the "publish a consistent snapshot" pattern.</li>
+  <li><strong>Reading side mirrors it:</strong> <code>Render</code> copies the whole struct out under the lock into a local <code>w</code>, then unlocks and draws. <strong>Hold the lock as briefly as possible</strong> — copy out, then do slow rendering unlocked, so the network thread never stalls the UI.</li>
+  <li><strong><code>std::scoped_lock</code></strong> (C++17) standardized over the old <code>std::lock_guard</code>; both auto-unlock via RAII. Note the throwaway local <code>std::mutex m;</code> exists only because <code>condition_variable_any::wait_for</code> needs <em>a</em> lock to wait on — it protects nothing, just enables an interruptible sleep.</li>
+</ul>
+<p><strong><code>FetchAdvice</code> extracted:</strong> the inline LLM-calling code is now its own method that simply <em>returns</em> the advice string (or a <code>basicAdvice</code> fallback). The fetch loop now reads as <code>advice = FetchAdvice(…)</code> instead of 60 lines of nested try/catch — the refactor's clearest readability win. It also switched from typed structs + <code>NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE</code> to inline <code>j.at("choices").at(0)…</code> navigation.</p>
+<div class="callout gotcha">
+  <span class="tag">Gotcha — <code>.at()</code> vs <code>[]</code></span>
+  <p>With nlohmann::json, <code>.at("key")</code> <strong>throws</strong> if the key is missing, whereas <code>operator[]</code> silently inserts a null. Because parsing runs inside <code>try/catch (std::exception)</code>, a malformed API response throws, gets logged, and leaves <code>ok = false</code> — a safe failure. Using <code>[]</code> here could mask bad data.</p>
+</div>
+
+<h2 id="s10"><span class="num">10</span>Drawing primitives</h2>
+<p>New helpers <code>drawIcon</code>, <code>fillRect</code>, <code>fillCircle</code>, <code>drawGradient</code>. Two build vertex/index arrays for <code>SDL_RenderGeometry</code>:</p>
+<pre><code><span class="tok-kw">void</span> fillCircle(<span class="tok-kw">float</span> cx, <span class="tok-kw">float</span> cy, <span class="tok-kw">float</span> r, Col c) {
+  <span class="tok-kw">constexpr</span> <span class="tok-kw">int</span> seg = <span class="tok-str">20</span>;
+  SDL_Vertex v[seg + <span class="tok-str">1</span>];  <span class="tok-kw">int</span> idx[seg * <span class="tok-str">3</span>];
+  v[<span class="tok-str">0</span>] = {{cx, cy}, fc, {<span class="tok-str">0</span>, <span class="tok-str">0</span>}};       <span class="tok-com">// center vertex (a "fan")</span>
+  <span class="tok-kw">for</span> (<span class="tok-kw">int</span> i = <span class="tok-str">0</span>; i &lt; seg; ++i) {
+    <span class="tok-kw">float</span> a = (<span class="tok-kw">float</span>)i / seg * <span class="tok-str">2.0f</span> * (<span class="tok-kw">float</span>)M_PI;
+    v[i + <span class="tok-str">1</span>] = {{cx + std::cos(a)*r, cy + std::sin(a)*r}, fc, {<span class="tok-str">0</span>, <span class="tok-str">0</span>}};
+    idx[i*<span class="tok-str">3</span>] = <span class="tok-str">0</span>; idx[i*<span class="tok-str">3</span>+<span class="tok-str">1</span>] = i+<span class="tok-str">1</span>; idx[i*<span class="tok-str">3</span>+<span class="tok-str">2</span>] = (i+<span class="tok-str">1</span>) % seg + <span class="tok-str">1</span>;
+  }
+}</code></pre>
+<ul>
+  <li>A filled circle is a <strong>triangle fan</strong>: one center vertex plus 20 rim vertices → 20 triangles, each <code>(center, rim[i], rim[i+1])</code>. The <code>(i+1) % seg + 1</code> wraps the last triangle back to the first rim vertex to close the circle. A missing modulo leaves a pie-slice gap.</li>
+  <li><strong><code>SDL_Vertex</code> uses normalized <code>SDL_FColor</code> (0.0–1.0)</strong>, hence <code>c.r / 255.f</code> — the same convention clash from §4, converted at the boundary.</li>
+  <li><strong><code>SDL_Vertex v[seg + 1];</code></strong> is a fixed-size stack array (compile-time constant size). Cheap, no heap. The gradient does the same with 4 corner vertices — top two colored <code>ct</code>, bottom two <code>cb</code>, and SDL interpolates the gradient across the quad for free.</li>
+</ul>
+
+<h2 id="s11"><span class="num">11</span><code>Render</code> restructured into named draw methods</h2>
+<pre><code><span class="tok-kw">void</span> Render() {
+  <span class="tok-kw">std::tm</span> tm = localNow();
+  <span class="tok-kw">float</span> f = dayFactor(tm);
+  <span class="tok-kw">bool</span> isDay = f &gt;= <span class="tok-str">0.5f</span>;
+  Palette p = mixPalette(f);
+  WeatherState w; { std::scoped_lock lock(weatherMutex); w = weather; }
+
+  drawGradient(p.bg0, p.bg1);
+  DrawDate(tm, p);
+  DrawTime(tm, p);
+  DrawWeatherStrip(w, isDay, p);
+  DrawRain(w, p);
+}</code></pre>
+<p>The new <code>Render</code> reads like a table of contents — each <code>DrawX</code> is self-contained. Worth noticing inside them:</p>
+<ul>
+  <li><strong>Blinking colon without re-rendering:</strong> <code>SDL_GetTicks() % 2000</code> gives a 0–2000 ms sawtooth; a cosine turns it into a smooth pulse used as the colon's <em>alpha</em>. Because color/alpha apply at draw time (§7), the pulse is free every frame.</li>
+  <li><strong>Absolute layout via <code>Config</code> baselines</strong> replaces the old relative chaining. <code>DrawWeatherStrip</code> walks a cursor <code>x</code> left-to-right (<code>x += lTempNum.w + 6.0f; …</code>) — predictable, with dividers as 1px <code>fillRect</code>s.</li>
+</ul>
+<div class="callout gotcha">
+  <span class="tag">Gotcha — <code>toupper</code> and signed <code>char</code></span>
+  <p><code>c = (char)std::toupper((unsigned char)c);</code> — <code>std::toupper</code> takes an <code>int</code> that must be representable as <code>unsigned char</code> (or EOF). Passing a plain <code>char</code> that's negative (bytes ≥ 128, common in UTF-8) is <strong>undefined behavior</strong>. The <code>(unsigned char)</code> cast is the standard-mandated fix. It only upper-cases ASCII — fine, since date strings are English now.</p>
+</div>
+
+<h2 id="s12"><span class="num">12</span>Screenshot mode &amp; the main loop</h2>
+<pre><code>shotPath = SDL_getenv(<span class="tok-str">"APP_SHOT"</span>);
+<span class="tok-kw">if</span> (<span class="tok-kw">const char</span> *sf = SDL_getenv(<span class="tok-str">"APP_SHOT_FRAME"</span>)) shotFrame = SDL_atoi(sf);
+<span class="tok-com">// ...</span>
+SDL_AppResult Iterate() {
+  Render();
+  <span class="tok-kw">if</span> (shotPath &amp;&amp; ++frameCount &gt;= shotFrame) <span class="tok-kw">return</span> SDL_APP_SUCCESS;
+  SDL_Delay(<span class="tok-str">16</span>);
+  <span class="tok-kw">return</span> SDL_APP_CONTINUE;
+}</code></pre>
+<p>If <code>APP_SHOT=path.png</code> is set, the app renders <code>shotFrame</code> frames, saves a PNG (<code>SDL_RenderReadPixels</code> + <code>IMG_SavePNG</code>), and exits with <code>SDL_APP_SUCCESS</code> — the headless-verification hook. <code>SDL_AppResult</code> is SDL3's callback convention: <code>CONTINUE</code> keeps looping, <code>SUCCESS</code> exits cleanly.</p>
+<p>The old <code>UpdateTiming</code>/<code>deltaTime</code>/<code>fps</code> machinery is gone because nothing animates with a real delta-time anymore; a flat <code>SDL_Delay(16)</code> (~60 FPS) suffices. Also, the SDL callbacks at the bottom dropped their <strong>unused parameter names</strong> — <code>SDL_AppInit(void **appstate, int, char *[])</code>. An unnamed parameter says "I must match this signature but don't use this argument," silencing warnings. A new <code>ESCAPE</code>-to-quit handler was added in <code>SDL_AppEvent</code>.</p>
+
+<hr>
+
+<h2 id="summary">Summary table</h2>
+<table>
+  <thead><tr><th>Area</th><th>Old</th><th>New</th><th>Why it's better</th></tr></thead>
+  <tbody>
+    <tr><td>Weather lookup</td><td><code>std::map</code> (heap, O(log n))</td><td><code>switch</code> / jump table</td><td>Faster, no allocation, data-in-code</td></tr>
+    <tr><td>Text labels</td><td><code>std::function</code> callbacks, baked shadow, white-only</td><td>White texture + tint-at-draw, cache guard, baseline-aware</td><td>Free re-coloring/blinking; re-rasterize only on change</td></tr>
+    <tr><td>Threads</td><td>2 threads, 2–3 mutexes, split state</td><td>1 thread, 1 mutex, one <code>WeatherState</code> snapshot</td><td>Consistent reads, less lock surface</td></tr>
+    <tr><td>Theme</td><td>Fixed dark + photo bg</td><td><code>constexpr</code> palettes + time-of-day crossfade</td><td>Compile-time constants, smooth transitions</td></tr>
+    <tr><td>Colors</td><td>—</td><td><code>Col</code> float 0–255, convert at SDL boundary</td><td>Cheap mixing; watch the 0–255 vs 0–1 clash</td></tr>
+    <tr><td>JSON</td><td>Typed structs + macro</td><td><code>.at()</code> navigation in try/catch</td><td>Throws on bad data → safe failure</td></tr>
+  </tbody>
+</table>
+
+<p>The recurring lesson across the whole commit: <strong>do expensive work only when inputs change, keep locks short, use RAII (<code>SdlPtr</code>) so C resources can't leak, and let the type system (scoped enums, move-only pointers, <code>constexpr</code>) catch mistakes at compile time.</strong> The two genuinely subtle spots to keep an eye on are the <strong>0–255 vs 0.0–1.0 color convention</strong> and the <strong>UTF-8 / <code>toupper((unsigned char))</code></strong> handling — both handled right here, and both classic beginner bug sites.</p>
+
+</div>
+</body>
+</html>
