@@ -53,9 +53,15 @@ set(SDL3_DIR "${sdl3_BINARY_DIR}")
 
 FetchContent_Declare(SDL3_Image
     GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
-    GIT_TAG release-3.2.4)
+    GIT_TAG release-3.2.4
+    GIT_SHALLOW TRUE
+    GIT_SUBMODULES "")  # Vendored codecs are not needed: JPEG/PNG are decoded by the built-in STB backend
 # Options to make cross-compiling Image easier (use built-in codecs)
+set(SDL3IMAGE_VENDORED OFF CACHE BOOL "" FORCE)
 set(SDL3IMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
+foreach(fmt AVIF JXL TIF WEBP)
+    set(SDL3IMAGE_${fmt} OFF CACHE BOOL "" FORCE)
+endforeach()
 set(SDL3IMAGE_BACKEND_IMAGEIO OFF CACHE BOOL "" FORCE)
 set(SDL3IMAGE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3_Image)

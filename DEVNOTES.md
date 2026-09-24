@@ -120,3 +120,23 @@ and Auth Bearer <auth_token> header. It would return a JSON object with the foll
 
 To get your editor pick up on dependencies headers, compile your project once in debug mode.
 Then run `ln -s build/debug/compile_commands.json` in the root of your project and restart clangd.
+
+# Sky colours
+
+The background follows the real sunrise and sunset from the forecast (`daily=sunrise,sunset`; 07:00 and 19:00
+until the first fetch succeeds): night → blue hour → dawn → day → golden hour → dusk → night. Each palette in
+`namespace Sky` is designed for contrast on its own (ink ≥ 7:1, dim ink and small labels ≥ 4.5:1, accent and
+rain ≥ 3:1), and colours only blend between palettes of the same polarity. The single dark ↔ light flip at
+sunrise and sunset is a 2.5 s crossfade. Debug builds walk every minute of the day at startup and log any
+moment below those contrast targets.
+
+The sky (gradient, glow and a fixed "painted canvas" of brush strokes) is composed on the CPU once a minute at
+half resolution and drawn as one opaque texture, so a frame is just that quad plus the text. The app iterates at
+20 Hz, which is enough for the colon pulse.
+
+Debug-build helpers:
+
+```sh
+APP_FAKE_TIME=18:30 ./build/debug/digital_clock_v3             # pretend it is 18:30 today
+APP_SHOT=shot.png APP_SHOT_FRAME=40 ./build/debug/digital_clock_v3  # save a frame and exit
+```

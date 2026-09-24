@@ -6,6 +6,7 @@
 #include <SDL3_ttf/SDL_ttf.h>
 
 #include <cpr/cpr.h>
+#include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <ctime>
 #include <format>
 #include <mutex>
+#include <random>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -70,27 +72,66 @@ constexpr Col mix(const Col &a, const Col &b, float t) {
 }
 
 struct Palette {
-  Col bg0, bg1, ink, inkDim, inkMute, accent, rain, hair;
+  Col bg0, bg1, ink, inkDim, inkMute, accent, rain, hair, glow;
+  bool dark = true; // light ink on a dark sky, or dark ink on a light sky
 };
-// night: deep blue ink, warm amber accent, cool rain-blue
-constexpr Palette kDark{{13, 20, 29}, {10, 15, 22},  {238, 243, 249}, {125, 138, 160},
-                        {77, 87, 105}, {240, 182, 94}, {111, 177, 227}, {255, 255, 255, 23}};
-// day: cool off-white, ink text
-constexpr Palette kLight{{238, 241, 245}, {228, 232, 238}, {18, 24, 33},  {86, 98, 116},
-                         {151, 161, 176}, {193, 125, 28},  {47, 127, 196}, {18, 24, 33, 31}};
 
-Palette mixPalette(float f) {
-  return {mix(kDark.bg0, kLight.bg0, f),       mix(kDark.bg1, kLight.bg1, f),     mix(kDark.ink, kLight.ink, f),
-          mix(kDark.inkDim, kLight.inkDim, f), mix(kDark.inkMute, kLight.inkMute, f),
-          mix(kDark.accent, kLight.accent, f), mix(kDark.rain, kLight.rain, f),   mix(kDark.hair, kLight.hair, f)};
+Palette mixPalette(const Palette &a, const Palette &b, float t) {
+  return {mix(a.bg0, b.bg0, t),         mix(a.bg1, b.bg1, t),       mix(a.ink, b.ink, t),   mix(a.inkDim, b.inkDim, t),
+          mix(a.inkMute, b.inkMute, t), mix(a.accent, b.accent, t), mix(a.rain, b.rain, t), mix(a.hair, b.hair, t),
+          mix(a.glow, b.glow, t),       t < 0.5f ? a.dark : b.dark};
 }
 
-// Day factor 0 (night) .. 1 (day), with a one-hour crossfade at 07:00 and 19:00.
-float dayFactor(const std::tm &tm) {
-  float h = tm.tm_hour + tm.tm_min / 60.0f;
-  if (h <= 7.0f || h >= 19.0f) return 0.0f;
-  if (h >= 8.0f && h <= 18.0f) return 1.0f;
-  return (h < 8.0f) ? (h - 7.0f) : (19.0f - h);
+// Sky palettes through the day. Each one is designed on its own for contrast (ink >= 7:1, dim ink and small
+// labels >= 4.5:1, accent and rain >= 3:1 against both sky colours), and the day only ever blends between two
+// palettes of the same polarity. That is what the old single dark<->light crossfade got wrong: halfway through
+// it (18:30) the sky and the ink were the same grey.
+namespace Sky {
+constexpr Palette Night{{13, 20, 29},   {10, 15, 22},    {238, 243, 249},     {125, 138, 160},    {120, 132, 154},
+                        {240, 182, 94}, {111, 177, 227}, {255, 255, 255, 23}, {240, 182, 94, 26}, true};
+constexpr Palette BlueHour{{20, 24, 56},    {56, 32, 70},    {240, 238, 250},     {164, 160, 198},     {158, 154, 194},
+                           {255, 170, 140}, {130, 180, 240}, {255, 255, 255, 23}, {255, 150, 170, 34}, true};
+constexpr Palette Dawn{{253, 226, 214}, {250, 240, 222}, {38, 26, 40},     {104, 84, 98},       {112, 94, 106},
+                       {190, 86, 56},   {40, 100, 170},  {38, 26, 40, 31}, {255, 170, 150, 60}, false};
+constexpr Palette Day{{222, 236, 250}, {240, 243, 247}, {18, 24, 33},     {80, 92, 110},       {88, 98, 114},
+                      {170, 104, 18},  {36, 104, 172},  {18, 24, 33, 31}, {255, 255, 255, 70}, false};
+constexpr Palette Golden{{255, 212, 160}, {255, 236, 200}, {44, 26, 16},     {110, 76, 56},      {116, 84, 64},
+                         {176, 66, 26},   {36, 90, 156},   {44, 26, 16, 31}, {255, 170, 90, 60}, false};
+constexpr Palette Dusk{{34, 26, 70},   {92, 36, 58},    {244, 238, 242},     {196, 180, 198},    {186, 170, 190},
+                       {255, 150, 90}, {140, 185, 245}, {255, 255, 255, 23}, {255, 120, 80, 38}, true};
+} // namespace Sky
+
+struct SunTimes {
+  std::time_t sunrise = 0, sunset = 0;
+};
+
+// Sky palette for `now`, keyed to the real sunrise and sunset. Blends are smooth within a polarity; the one flip
+// per sunrise and sunset is handled by a short fade in the renderer.
+Palette skyPalette(std::time_t now, SunTimes sun) {
+  constexpr std::time_t min = 60;
+  struct Key {
+    std::time_t t;
+    const Palette *p;
+  };
+  const std::array<Key, 8> keys{{
+      {sun.sunrise - 75 * min, &Sky::Night},
+      {sun.sunrise - 20 * min, &Sky::BlueHour},
+      {sun.sunrise, &Sky::Dawn},
+      {sun.sunrise + 90 * min, &Sky::Day},
+      {sun.sunset - 100 * min, &Sky::Day},
+      {sun.sunset - 30 * min, &Sky::Golden},
+      {sun.sunset, &Sky::Dusk},
+      {sun.sunset + 80 * min, &Sky::Night},
+  }};
+  if (now < keys.front().t || now >= keys.back().t) return Sky::Night;
+  for (std::size_t i = 0; i + 1 < keys.size(); ++i) {
+    const Key &a = keys[i], &b = keys[i + 1];
+    if (now >= b.t) continue;
+    if (a.p->dark != b.p->dark) return *a.p; // hold until the flip at sunrise / sunset
+    const float t = (float)(now - a.t) / (float)std::max<std::time_t>(1, b.t - a.t);
+    return mixPalette(*a.p, *b.p, t);
+  }
+  return Sky::Night;
 }
 
 // ------------------------------------------------------------- weather ----
@@ -99,49 +140,77 @@ enum class Icon { ClearDay, ClearNight, PartlyDay, PartlyNight, Cloudy, Fog, Rai
 
 Icon iconFor(int code, bool day) {
   switch (code) {
-  case 0: return day ? Icon::ClearDay : Icon::ClearNight;
+  case 0:
+    return day ? Icon::ClearDay : Icon::ClearNight;
   case 1:
-  case 2: return day ? Icon::PartlyDay : Icon::PartlyNight;
-  case 3: return Icon::Cloudy;
+  case 2:
+    return day ? Icon::PartlyDay : Icon::PartlyNight;
+  case 3:
+    return Icon::Cloudy;
   case 45:
-  case 48: return Icon::Fog;
+  case 48:
+    return Icon::Fog;
   case 71:
   case 73:
   case 75:
   case 77:
   case 85:
-  case 86: return Icon::Snow;
+  case 86:
+    return Icon::Snow;
   case 95:
   case 96:
-  case 99: return Icon::Thunder;
-  default: return Icon::Rain; // drizzle 51-57, rain 61-67, showers 80-82
+  case 99:
+    return Icon::Thunder;
+  default:
+    return Icon::Rain; // drizzle 51-57, rain 61-67, showers 80-82
   }
 }
 
 std::string conditionText(int code) {
   switch (code) {
-  case 0: return "clear sky";
-  case 1: return "mainly clear";
-  case 2: return "partly cloudy";
-  case 3: return "overcast";
-  case 45: return "fog";
-  case 48: return "rime fog";
-  case 51: return "light drizzle";
-  case 53: return "drizzle";
-  case 55: return "dense drizzle";
-  case 61: return "light rain";
-  case 63: return "rain";
-  case 65: return "heavy rain";
-  case 71: return "light snow";
-  case 73: return "snow";
-  case 75: return "heavy snow";
-  case 80: return "rain showers";
-  case 81: return "rain showers";
-  case 82: return "violent rain showers";
-  case 95: return "thunderstorm";
+  case 0:
+    return "clear sky";
+  case 1:
+    return "mainly clear";
+  case 2:
+    return "partly cloudy";
+  case 3:
+    return "overcast";
+  case 45:
+    return "fog";
+  case 48:
+    return "rime fog";
+  case 51:
+    return "light drizzle";
+  case 53:
+    return "drizzle";
+  case 55:
+    return "dense drizzle";
+  case 61:
+    return "light rain";
+  case 63:
+    return "rain";
+  case 65:
+    return "heavy rain";
+  case 71:
+    return "light snow";
+  case 73:
+    return "snow";
+  case 75:
+    return "heavy snow";
+  case 80:
+    return "rain showers";
+  case 81:
+    return "rain showers";
+  case 82:
+    return "violent rain showers";
+  case 95:
+    return "thunderstorm";
   case 96:
-  case 99: return "thunderstorm with hail";
-  default: return "unknown";
+  case 99:
+    return "thunderstorm with hail";
+  default:
+    return "unknown";
   }
 }
 
@@ -153,19 +222,70 @@ std::string basicAdvice(double t) {
   return "Light clothing is fine.";
 }
 
-constexpr std::array<std::string_view, 7> kWeekdays = {"Sunday",   "Monday", "Tuesday",  "Wednesday",
+constexpr std::array<std::string_view, 7> kWeekdays = {"Sunday",   "Monday", "Tuesday", "Wednesday",
                                                        "Thursday", "Friday", "Saturday"};
-constexpr std::array<std::string_view, 12> kMonths = {"January", "February", "March",     "April",   "May",      "June",
-                                                      "July",    "August",   "September", "October", "November", "December"};
+constexpr std::array<std::string_view, 12> kMonths = {"January",   "February", "March",    "April",
+                                                      "May",       "June",     "July",     "August",
+                                                      "September", "October",  "November", "December"};
 
 std::string dateString(const std::tm &tm) {
   return std::format("{}, {} {} {}", kWeekdays[tm.tm_wday], tm.tm_mday, kMonths[tm.tm_mon], tm.tm_year + 1900);
 }
 
-std::tm localNow() {
-  auto t = std::time(nullptr);
-  return *std::localtime(&t);
+// std::localtime returns shared static storage, which races between the render and weather threads;
+// localtime_r fills a caller-owned struct.
+std::tm localTime(std::time_t t) {
+  std::tm tm{};
+  localtime_r(&t, &tm);
+  return tm;
 }
+
+#ifdef APP_DEBUG
+// Debug: APP_FAKE_TIME=HH:MM pins the clock to that time today, to check the sky at any hour.
+std::time_t fakeTimeOffset() {
+  static const std::time_t offset = [] {
+    int h = 0, m = 0;
+    const char *env = SDL_getenv("APP_FAKE_TIME");
+    if (!env || std::sscanf(env, "%d:%d", &h, &m) != 2) return std::time_t{0};
+    const std::time_t now = std::time(nullptr);
+    std::tm tm = localTime(now);
+    tm.tm_hour = h, tm.tm_min = m, tm.tm_sec = 0, tm.tm_isdst = -1;
+    return std::mktime(&tm) - now;
+  }();
+  return offset;
+}
+std::time_t now() { return std::time(nullptr) + fakeTimeOffset(); }
+#else
+std::time_t now() { return std::time(nullptr); }
+#endif
+
+std::tm localNow() { return localTime(now()); }
+
+// Fallback when the forecast has not delivered today's sun times yet: 07:00 and 19:00.
+SunTimes defaultSunTimes() {
+  std::tm tm = localNow();
+  tm.tm_min = 0, tm.tm_sec = 0, tm.tm_isdst = -1;
+  tm.tm_hour = 7;
+  const std::time_t sunrise = std::mktime(&tm);
+  tm.tm_hour = 19, tm.tm_isdst = -1;
+  return {sunrise, std::mktime(&tm)};
+}
+
+// Interruptible sleep: returns early when the owning std::jthread is asked to stop.
+void sleepFor(const std::stop_token &stopToken, std::chrono::milliseconds duration) {
+  std::mutex m;
+  std::unique_lock lock(m);
+  std::condition_variable_any().wait_for(lock, stopToken, duration, [] { return false; });
+}
+
+// Hard timeouts on every request, and an abort as soon as a stop is requested, so a hung server can neither
+// freeze the worker thread nor hold up shutdown.
+cpr::ProgressCallback abortOnStop(std::stop_token stopToken) {
+  return cpr::ProgressCallback{[stopToken](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t,
+                                           intptr_t) { return !stopToken.stop_requested(); }};
+}
+const auto kConnectTimeout = cpr::ConnectTimeout{std::chrono::seconds(15)};
+const auto kTimeout = cpr::Timeout{std::chrono::seconds(60)};
 
 std::time_t parseTs(const std::string &s) {
   std::tm tm{};
@@ -186,7 +306,8 @@ struct WeatherState {
   double windspeed = 0;
   int weathercode = 0;
   std::string advice;
-  std::vector<float> rain; // precipitation mm per 15-min step, starting ~now
+  std::vector<float> rain;   // precipitation mm per 15-min step, starting ~now
+  std::vector<SunTimes> sun; // one entry per forecast day
 };
 
 // ------------------------------------------------------------- helpers ----
@@ -292,6 +413,107 @@ struct TrackedLabel {
   }
 };
 
+// ------------------------------------------------------------ painting ----
+
+// The sky is composed on the CPU into one opaque half-resolution image: vertical gradient, the soft glow from the
+// mockup, and a "painted canvas" of broad brush strokes. It is re-composed once a minute (a few ms on a Pi 3) and
+// drawn as a single opaque, linearly scaled quad per frame, which is cheaper than drawing the layers separately.
+constexpr int kSkyW = Config::screen_width / 2, kSkyH = Config::screen_height / 2;
+
+// Brush strokes as a field from -1 (dark stroke) to +1 (light stroke): mostly horizontal sweeps with bristle
+// streaks. Neutral, so the same strokes brush every sky palette. Fixed seed: the same canvas on every start.
+std::vector<float> makeCanvasField(int w, int h) {
+  std::vector<float> paint((std::size_t)w * h, 0.0f);
+  std::mt19937 rng(20260924u); // fixed seed: the same canvas every start
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+
+  const int strokes = w * h / 220;
+  for (int i = 0; i < strokes; ++i) {
+    const float cx = unit(rng) * w, cy = unit(rng) * h;
+    const float halfLen = 18.0f + unit(rng) * 55.0f, halfWid = 2.5f + unit(rng) * 5.5f;
+    const float angle = (unit(rng) - 0.5f) * 0.35f + 0.12f * std::sin(cy * 0.03f); // a sky painter's sweep
+    const float value = (unit(rng) - 0.5f) * 2.0f;
+    const float phase = unit(rng) * 6.28f;
+    const float c = std::cos(angle), sn = std::sin(angle);
+    const float ex = std::abs(c) * halfLen + std::abs(sn) * halfWid,
+                ey = std::abs(sn) * halfLen + std::abs(c) * halfWid;
+    const int x0 = std::max(0, (int)(cx - ex)), x1 = std::min(w - 1, (int)(cx + ex) + 1);
+    const int y0 = std::max(0, (int)(cy - ey)), y1 = std::min(h - 1, (int)(cy + ey) + 1);
+    for (int y = y0; y <= y1; ++y) {
+      for (int x = x0; x <= x1; ++x) {
+        const float dx = x - cx, dy = y - cy;
+        const float u = (dx * c + dy * sn) / halfLen, v = (dy * c - dx * sn) / halfWid;
+        const float d = u * u + v * v;
+        if (d >= 1.0f) continue;
+        const float bristle = 0.6f + 0.4f * std::sin(v * 9.0f + phase); // streaks along the stroke
+        const float alpha = 0.55f * std::min(1.0f, (1.0f - d) * 3.0f) * bristle;
+        float &px = paint[(std::size_t)y * w + x];
+        px += (value - px) * alpha;
+      }
+    }
+  }
+
+  return paint;
+}
+
+void bakeSky(const Palette &p, const std::vector<float> &canvas, SDL_Surface *out) {
+  constexpr float strokeStrength = 16.0f / 255.0f; // blend weight of a full-strength stroke
+  const int w = out->w, h = out->h;
+  // Glow: radial-gradient(120% 80% at 50% 12%, glow, transparent 60%), in half-resolution pixels.
+  const float gx = w * 0.5f, gy = h * 0.12f, grx = w * 1.2f * 0.6f, gry = h * 0.8f * 0.6f;
+  for (int y = 0; y < h; ++y) {
+    auto *row = (Uint8 *)out->pixels + (std::size_t)y * out->pitch;
+    const Col bg = mix(p.bg0, p.bg1, (y + 0.5f) / h);
+    for (int x = 0; x < w; ++x) {
+      const float dx = (x - gx) / grx, dy = (y - gy) / gry;
+      const float glow = std::max(0.0f, 1.0f - std::sqrt(dx * dx + dy * dy)) * p.glow.a / 255.0f;
+      Col c = mix(bg, p.glow, glow);
+      const float stroke = canvas[(std::size_t)y * w + x];
+      c = mix(c, stroke > 0 ? Col{255, 255, 255} : Col{0, 0, 0}, std::abs(stroke) * strokeStrength);
+      row[x * 4 + 0] = (Uint8)std::clamp(c.r, 0.0f, 255.0f);
+      row[x * 4 + 1] = (Uint8)std::clamp(c.g, 0.0f, 255.0f);
+      row[x * 4 + 2] = (Uint8)std::clamp(c.b, 0.0f, 255.0f);
+      row[x * 4 + 3] = 255;
+    }
+  }
+}
+
+float relativeLuminance(Col c) {
+  auto lin = [](float v) {
+    v /= 255.0f;
+    return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+  };
+  return 0.2126f * lin(c.r) + 0.7152f * lin(c.g) + 0.0722f * lin(c.b);
+}
+
+float contrast(Col a, Col b) {
+  float la = relativeLuminance(a), lb = relativeLuminance(b);
+  if (la < lb) std::swap(la, lb);
+  return (la + 0.05f) / (lb + 0.05f);
+}
+
+#ifdef APP_DEBUG
+// Walks the sky through a whole day, minute by minute, and logs any moment where text would be hard to read.
+void verifySkyContrast(SunTimes sun) {
+  int failures = 0;
+  for (std::time_t t = sun.sunrise - 12 * 3600; t < sun.sunrise + 36 * 3600 && failures < 10; t += 60) {
+    const Palette p = skyPalette(t, sun);
+    for (const Col &bg : {p.bg0, p.bg1}) {
+      const float ink = contrast(p.ink, bg), dim = contrast(p.inkDim, bg), mute = contrast(p.inkMute, bg);
+      const float accent = contrast(p.accent, bg), rain = contrast(p.rain, bg);
+      if (ink < 7.0f || dim < 4.5f || mute < 4.5f || accent < 3.0f || rain < 3.0f) {
+        const std::tm tm = localTime(t);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Low contrast at %02d:%02d: ink %.1f dim %.1f mute %.1f accent %.1f rain %.1f", tm.tm_hour,
+                    tm.tm_min, ink, dim, mute, accent, rain);
+        ++failures;
+      }
+    }
+  }
+  if (failures == 0) SDL_Log("Sky contrast OK for every minute of the day");
+}
+#endif
+
 // ------------------------------------------------------------- the app ----
 
 class Clock {
@@ -299,6 +521,12 @@ public:
   Clock() = default;
   Clock(const Clock &) = delete;
   Clock &operator=(const Clock &) = delete;
+
+  // The weather thread writes to members of this object: stop and join it before anything else is destroyed.
+  ~Clock() {
+    weatherLoaderThread.request_stop();
+    if (weatherLoaderThread.joinable()) weatherLoaderThread.join();
+  }
 
   bool Init() {
     SDL_SetAppMetadata(Config::AppName, Config::AppVersion, nullptr);
@@ -316,6 +544,11 @@ public:
     window.reset(w);
     renderer.reset(r);
     SDL_SetRenderDrawBlendMode(renderer.get(), SDL_BLENDMODE_BLEND);
+    if (!SDL_SetRenderVSync(renderer.get(), 1)) {
+      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't enable vsync: %s", SDL_GetError());
+    }
+    // Only the colon pulse moves, and it is slow: 20 frames a second is smooth and leaves the Pi mostly idle.
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "20");
 
     if (!TTF_Init()) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL_ttf: %s", SDL_GetError());
@@ -343,6 +576,19 @@ public:
     approx = TTF_FontHasGlyph(fRainCap.get(), 0x2248) ? "\xE2\x89\x88" : "~";      // ≈
 
     LoadIcons();
+    canvasField = makeCanvasField(kSkyW, kSkyH);
+    skySurface.reset(SDL_CreateSurface(kSkyW, kSkyH, SDL_PIXELFORMAT_RGBA32));
+    for (auto &tex : skyTex) {
+      tex.reset(SDL_CreateTexture(renderer.get(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, kSkyW, kSkyH));
+      if (tex) SDL_SetTextureScaleMode(tex.get(), SDL_SCALEMODE_LINEAR);
+    }
+    if (!skySurface || !skyTex[0] || !skyTex[1]) {
+      SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't create sky textures: %s", SDL_GetError());
+      return false;
+    }
+#ifdef APP_DEBUG
+    verifySkyContrast(defaultSunTimes());
+#endif
 
     if (!SDL_SetRenderLogicalPresentation(renderer.get(), Config::screen_width, Config::screen_height,
                                           SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
@@ -356,6 +602,8 @@ public:
     shotPath = SDL_getenv("APP_SHOT");
     if (const char *sf = SDL_getenv("APP_SHOT_FRAME")) shotFrame = SDL_atoi(sf);
 
+    // SDL fills its CPU-feature cache lazily and without a lock; do it here, before the worker thread exists.
+    SDL_GetSIMDAlignment();
     weatherLoaderThread = std::jthread(&Clock::FetchWeather, this);
     return true;
   }
@@ -363,7 +611,6 @@ public:
   SDL_AppResult Iterate() {
     Render();
     if (shotPath && ++frameCount >= shotFrame) return SDL_APP_SUCCESS;
-    SDL_Delay(16);
     return SDL_APP_CONTINUE;
   }
 
@@ -375,12 +622,28 @@ private:
   std::array<TexturePtr, (std::size_t)Icon::COUNT> icons;
   std::string windUnit = "m/s";
   std::string approx = "~";
-  const std::string deg = "\xC2\xB0";   // °
+  const std::string deg = "\xC2\xB0";    // °
   const std::string mdot = " \xC2\xB7 "; // · with spaces
 
-  std::jthread weatherLoaderThread;
   std::mutex weatherMutex;
   WeatherState weather;
+  SunTimes lastSun; // kept across failed fetches: sun times do not go stale within the day
+
+  // Sky: two streaming textures so the dark <-> light flip at sunrise and sunset can crossfade between them.
+  std::vector<float> canvasField;
+  SurfacePtr skySurface;
+  std::array<TexturePtr, 2> skyTex;
+  int skyCur = 0;
+  std::time_t skyBakedMinute = -1;
+  bool skyBakedDark = true;
+
+  // Text colours fade along with the sky during a flip.
+  Palette shown = Sky::Night;
+  bool haveShown = false;
+  Palette flipFrom;
+  Uint64 flipStartMs = 0;
+  bool flipping = false;
+  static constexpr float kFlipMs = 2500.0f;
 
   const char *shotPath = nullptr;
   int shotFrame = 180;
@@ -392,6 +655,9 @@ private:
   Label lTempNum, lTempUnit, lWindNum, lWindUnit;
   Label lAdvice, lRainCap, lRainDry;
   Label lAxisNow, lAxisMid, lAxisEnd;
+
+  // Declared last so it is destroyed first; ~Clock also joins it explicitly.
+  std::jthread weatherLoaderThread;
 
   // -------------------------------------------------------------- assets --
   void LoadIcons() {
@@ -452,31 +718,29 @@ private:
     SDL_RenderGeometry(renderer.get(), nullptr, v, seg + 1, idx, seg * 3);
   }
 
-  void drawGradient(Col top, Col bot) {
-    SDL_FColor ct{top.r / 255.f, top.g / 255.f, top.b / 255.f, 1.f};
-    SDL_FColor cb{bot.r / 255.f, bot.g / 255.f, bot.b / 255.f, 1.f};
-    const float W = Config::screen_width, H = Config::screen_height;
-    SDL_Vertex v[4] = {
-        {{0, 0}, ct, {0, 0}}, {{W, 0}, ct, {0, 0}}, {{W, H}, cb, {0, 0}}, {{0, H}, cb, {0, 0}}};
-    int idx[6] = {0, 1, 2, 2, 3, 0};
-    SDL_RenderGeometry(renderer.get(), nullptr, v, 4, idx, 6);
-  }
-
   // --------------------------------------------------------------- data --
+  // SDL keeps per-thread error strings for threads it did not create; the thread has to free them itself.
+  struct SdlThreadCleanup {
+    ~SdlThreadCleanup() { SDL_CleanupTLS(); }
+  };
+
   void FetchWeather(std::stop_token stopToken) {
+    SdlThreadCleanup cleanup;
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
     const auto url = cpr::Url{"https://api.open-meteo.com/v1/forecast"};
-    const auto params = cpr::Parameters{{"latitude", "52.3738"},         {"longitude", "4.8910"},
-                                        {"current_weather", "true"},     {"minutely_15", "precipitation"},
-                                        {"windspeed_unit", "ms"},        {"forecast_days", "2"},
-                                        {"timezone", "auto"}};
+    const auto params =
+        cpr::Parameters{{"latitude", "52.3738"},          {"longitude", "4.8910"},  {"current_weather", "true"},
+                        {"minutely_15", "precipitation"}, {"windspeed_unit", "ms"}, {"forecast_days", "2"},
+                        {"daily", "sunrise,sunset"},      {"timezone", "auto"}};
 
     while (!stopToken.stop_requested()) {
       bool ok = false;
       double temp = 0, wind = 0;
       int code = 0;
       std::vector<float> rain;
+      std::vector<SunTimes> sun;
       try {
-        cpr::Response resp = cpr::Get(url, params, cpr::Timeout{60000});
+        cpr::Response resp = cpr::Get(url, params, kConnectTimeout, kTimeout, abortOnStop(stopToken));
         if (resp.status_code == 200) {
           auto j = json::parse(resp.text);
           const auto &cw = j.at("current_weather");
@@ -490,9 +754,20 @@ private:
             const auto &precip = m.at("precipitation");
             std::time_t now = std::time(nullptr);
             std::size_t start = 0;
-            while (start < times.size() && parseTs(times[start].get<std::string>()) < now - 450) start++;
+            while (start < times.size() && parseTs(times[start].get<std::string>()) < now - 450)
+              start++;
             for (std::size_t i = start; i < start + 8 && i < precip.size(); ++i) {
               rain.push_back(precip[i].is_null() ? 0.0f : (float)precip[i].get<double>());
+            }
+          }
+          if (j.contains("daily")) {
+            const auto &d = j.at("daily");
+            const auto &rises = d.at("sunrise");
+            const auto &sets = d.at("sunset");
+            for (std::size_t i = 0; i < rises.size() && i < sets.size(); ++i) {
+              if (!rises[i].is_string() || !sets[i].is_string()) continue;
+              const SunTimes st{parseTs(rises[i].get<std::string>()), parseTs(sets[i].get<std::string>())};
+              if (st.sunrise > 0 && st.sunset > st.sunrise) sun.push_back(st);
             }
           }
           ok = true;
@@ -502,7 +777,7 @@ private:
       }
 
       std::string advice;
-      if (ok) advice = FetchAdvice(temp, code);
+      if (ok) advice = FetchAdvice(temp, code, stopToken);
 
       {
         std::scoped_lock lock(weatherMutex);
@@ -512,30 +787,41 @@ private:
           weather.windspeed = wind;
           weather.weathercode = code;
           weather.rain = std::move(rain);
+          weather.sun = std::move(sun);
           weather.advice = std::move(advice);
         } else {
+          std::vector<SunTimes> keep = std::move(weather.sun);
           weather = WeatherState{};
+          weather.sun = std::move(keep);
         }
       }
 
-      std::mutex m;
-      std::unique_lock lock(m);
-      std::condition_variable_any().wait_for(lock, stopToken, std::chrono::minutes(5),
-                                             [&stopToken] { return stopToken.stop_requested(); });
+      // Every 5 minutes; sooner after a failure (e.g. Wi-Fi not up yet right after boot).
+      sleepFor(stopToken, ok ? std::chrono::minutes(5) : std::chrono::minutes(1));
     }
   }
 
-  std::string FetchAdvice(double temp, int code) {
+  // One short sentence, or the offline advice when the model returns nothing usable.
+  static std::string sanitizeAdvice(std::string out, double temp) {
+    std::replace(out.begin(), out.end(), '\n', ' ');
+    const auto first = out.find_first_not_of(" \t\r\"");
+    const auto last = out.find_last_not_of(" \t\r\"");
+    out = first == std::string::npos ? std::string() : out.substr(first, last - first + 1);
+    if (out.empty() || out.size() > 200) return basicAdvice(temp);
+    return out;
+  }
+
+  std::string FetchAdvice(double temp, int code, const std::stop_token &stopToken) {
     std::string apiKey = Config::GroqApiKey;
     if (apiKey.empty() || apiKey == "MISSING_KEY") return basicAdvice(temp);
     try {
       std::tm tm = localNow();
-      std::string prompt = std::format(
-          "I live in Amsterdam. Today is {}, the time is {:02}:{:02} and the weather is {} ({:.0f}C). "
-          "What should I wear? Answer as one short sentence, continuing the phrase \"You should wear\" "
-          "but WITHOUT the words \"you should wear\" — just the clothing. Do not mention the city, "
-          "time, date or the weather itself.",
-          dateString(tm), tm.tm_hour, tm.tm_min, conditionText(code), temp);
+      std::string prompt =
+          std::format("I live in Amsterdam. Today is {}, the time is {:02}:{:02} and the weather is {} ({:.0f}C). "
+                      "What should I wear? Answer as one short sentence, continuing the phrase \"You should wear\" "
+                      "but WITHOUT the words \"you should wear\" — just the clothing. Do not mention the city, "
+                      "time, date or the weather itself.",
+                      dateString(tm), tm.tm_hour, tm.tm_min, conditionText(code), temp);
       json payload = {{"model", "openai/gpt-oss-120b"},
                       {"max_tokens", 120},
                       {"temperature", 0.7},
@@ -545,12 +831,10 @@ private:
       cpr::Response r = cpr::Post(
           cpr::Url{"https://api.groq.com/openai/v1/chat/completions"}, cpr::Body{payload.dump()},
           cpr::Header{{"Authorization", std::string("Bearer ") + apiKey}, {"Content-Type", "application/json"}},
-          cpr::Timeout{60000});
+          kConnectTimeout, kTimeout, abortOnStop(stopToken));
       if (r.status_code == 200) {
         auto j = json::parse(r.text);
-        std::string out = j.at("choices").at(0).at("message").at("content").get<std::string>();
-        if (out.size() > 1 && out.front() == '"' && out.back() == '"') out = out.substr(1, out.size() - 2);
-        if (!out.empty()) return out;
+        return sanitizeAdvice(j.at("choices").at(0).at("message").at("content").get<std::string>(), temp);
       } else {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "LLM fetch failed %ld", r.status_code);
       }
@@ -562,23 +846,29 @@ private:
 
   // ------------------------------------------------------------- render --
   static std::string toUpper(std::string s) {
-    for (char &c : s) c = (char)std::toupper((unsigned char)c);
+    for (char &c : s)
+      c = (char)std::toupper((unsigned char)c);
     return s;
   }
 
   void Render() {
-    std::tm tm = localNow();
-    float f = dayFactor(tm);
-    bool isDay = f >= 0.5f;
-    Palette p = mixPalette(f);
+    const std::time_t t = now();
+    const std::tm tm = localTime(t);
 
     WeatherState w;
     {
       std::scoped_lock lock(weatherMutex);
       w = weather;
     }
-
-    drawGradient(p.bg0, p.bg1);
+    for (const SunTimes &st : w.sun) {
+      const std::tm rise = localTime(st.sunrise);
+      if (rise.tm_yday == tm.tm_yday && rise.tm_year == tm.tm_year) lastSun = st;
+    }
+    if (lastSun.sunrise == 0 || localTime(lastSun.sunrise).tm_yday != tm.tm_yday) lastSun = defaultSunTimes();
+    const bool isDay = t >= lastSun.sunrise && t < lastSun.sunset;
+    const Palette target = skyPalette(t, lastSun);
+    const Palette p = CurrentPalette(target);
+    DrawSky(target, t);
     DrawDate(tm, p);
     DrawTime(tm, p);
     DrawWeatherStrip(w, isDay, p);
@@ -591,6 +881,54 @@ private:
       }
     }
     SDL_RenderPresent(renderer.get());
+  }
+
+  // Re-composes the sky once a minute (the palette drifts slowly) and immediately when it flips polarity; the
+  // previous sky stays on the other texture and is faded out while the flip lasts.
+  void DrawSky(const Palette &target, std::time_t t) {
+    const std::time_t minute = t / 60;
+    const bool flip = skyBakedMinute >= 0 && target.dark != skyBakedDark;
+    if (minute != skyBakedMinute || flip) {
+      if (flip) skyCur ^= 1; // keep the old sky for the crossfade
+      bakeSky(target, canvasField, skySurface.get());
+      SDL_UpdateTexture(skyTex[skyCur].get(), nullptr, skySurface->pixels, skySurface->pitch);
+      skyBakedMinute = minute;
+      skyBakedDark = target.dark;
+    }
+    const SDL_FRect full{0, 0, (float)Config::screen_width, (float)Config::screen_height};
+    SDL_Texture *cur = skyTex[skyCur].get();
+    if (flipping) {
+      SDL_Texture *prev = skyTex[skyCur ^ 1].get();
+      SDL_SetTextureBlendMode(prev, SDL_BLENDMODE_NONE);
+      SDL_RenderTexture(renderer.get(), prev, nullptr, &full);
+      SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_BLEND);
+      SDL_SetTextureAlphaModFloat(cur, std::clamp((float)(SDL_GetTicks() - flipStartMs) / kFlipMs, 0.0f, 1.0f));
+    } else {
+      SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_NONE); // opaque: cheapest full-screen draw
+    }
+    SDL_RenderTexture(renderer.get(), cur, nullptr, &full);
+  }
+
+  // Applies the short fade when the sky flips between dark and light, so there is never a long grey-on-grey phase.
+  Palette CurrentPalette(const Palette &target) {
+    const Uint64 ticks = SDL_GetTicks();
+    if (haveShown && target.dark != shown.dark && !flipping) {
+      flipFrom = shown;
+      flipStartMs = ticks;
+      flipping = true;
+    }
+    haveShown = true;
+    Palette p = target;
+    if (flipping) {
+      const float k = std::clamp((float)(ticks - flipStartMs) / kFlipMs, 0.0f, 1.0f);
+      if (k >= 1.0f)
+        flipping = false;
+      else
+        p = mixPalette(flipFrom, target, k * k * (3.0f - 2.0f * k));
+    }
+    shown = p;
+    shown.dark = target.dark;
+    return p;
   }
 
   void DrawDate(const std::tm &tm, const Palette &p) {
@@ -670,7 +1008,7 @@ private:
     lAdvice.set(renderer.get(), fAdvice.get(), w.advice, wrapW);
     if (lAdvice.tex) {
       float ax = adviceRight - lAdvice.w;
-      float ay = (numCenter) - lAdvice.h / 2.0f + 4.0f;
+      float ay = (numCenter)-lAdvice.h / 2.0f + 4.0f;
       lAdvice.drawTop(renderer.get(), ax, ay, p.ink);
     }
   }
@@ -731,6 +1069,8 @@ private:
 };
 
 SDL_AppResult SDL_AppInit(void **appstate, int, char *[]) {
+  // libcurl's global init is not thread-safe: do it once, before the worker thread starts.
+  if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) return SDL_APP_FAILURE;
   auto *app = new Clock();
   if (!app->Init()) {
     delete app;
@@ -749,6 +1089,7 @@ SDL_AppResult SDL_AppEvent(void *, SDL_Event *event) {
 SDL_AppResult SDL_AppIterate(void *appstate) { return static_cast<Clock *>(appstate)->Iterate(); }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult) {
-  delete static_cast<Clock *>(appstate);
+  delete static_cast<Clock *>(appstate); // joins the weather thread
   TTF_Quit();
+  curl_global_cleanup();
 }
