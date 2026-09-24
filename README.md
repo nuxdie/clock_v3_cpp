@@ -1,4 +1,7 @@
-![clock_v3_cpp](screenshot.png)
+![clock_v3_cpp at noon, golden hour, dusk and night](screenshot.png)
+
+The sky follows the real sunrise and sunset: day, golden hour, dusk and night (plus blue hour and dawn), each
+with its own high-contrast text colours. See [DEVNOTES.md](DEVNOTES.md#sky-colours) for how it works.
 
 # Prerequisites
 
