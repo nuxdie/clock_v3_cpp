@@ -1,7 +1,8 @@
-![clock_v3_cpp at noon, golden hour, dusk and night](screenshot.png)
+![clock_v3_cpp in eight worlds: dawn, dawn rain, day, overcast, golden hour, sunset storm, night, night rain](screenshot.png)
 
-The sky follows the real sunrise and sunset: day, golden hour, dusk and night (plus blue hour and dawn), each
-with its own high-contrast text colours. See [DEVNOTES.md](DEVNOTES.md#sky-colours) for how it works.
+The background is an animated landscape that follows the real sunrise and sunset (night, blue hour, dawn, day,
+golden hour, dusk) and the weather (clear, grey, storm), with drifting clouds, rain, snow, fog, lightning, stars and
+swaying leaves. See [DEVNOTES.md](DEVNOTES.md#animated-background) for how it works.
 
 # Prerequisites
 

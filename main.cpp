@@ -18,7 +18,6 @@
 #include <ctime>
 #include <format>
 #include <mutex>
-#include <random>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -26,20 +25,17 @@
 
 #include "assets_fonts.h"
 #include "assets_icons.h"
+#include "scene.h"
 
 using json = nlohmann::json;
 
-template <typename T, auto Deleter>
-using SdlPtr = std::unique_ptr<T, std::integral_constant<decltype(Deleter), Deleter>>;
 using WindowPtr = SdlPtr<SDL_Window, SDL_DestroyWindow>;
 using RendererPtr = SdlPtr<SDL_Renderer, SDL_DestroyRenderer>;
-using SurfacePtr = SdlPtr<SDL_Surface, SDL_DestroySurface>;
-using TexturePtr = SdlPtr<SDL_Texture, SDL_DestroyTexture>;
 using FontPtr = SdlPtr<TTF_Font, TTF_CloseFont>;
 
 namespace Config {
-constexpr int screen_width = 1024;
-constexpr int screen_height = 600;
+constexpr int screen_width = Screen::width;
+constexpr int screen_height = Screen::height;
 constexpr const char *AppName = "Digital Clock v3";
 constexpr const char *AppVersion = "0.3.0";
 
@@ -61,78 +57,6 @@ constexpr float rain_chart_top = 524.0f;
 constexpr float rain_chart_h = 30.0f;
 constexpr float rain_axis_baseline = 570.0f;
 } // namespace Config
-
-// ---------------------------------------------------------------- colour --
-
-struct Col {
-  float r = 0, g = 0, b = 0, a = 255; // 0..255, kept as float for cheap mixing
-};
-constexpr Col mix(const Col &a, const Col &b, float t) {
-  return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
-}
-
-struct Palette {
-  Col bg0, bg1, ink, inkDim, inkMute, accent, rain, hair, glow;
-  bool dark = true; // light ink on a dark sky, or dark ink on a light sky
-};
-
-Palette mixPalette(const Palette &a, const Palette &b, float t) {
-  return {mix(a.bg0, b.bg0, t),         mix(a.bg1, b.bg1, t),       mix(a.ink, b.ink, t),   mix(a.inkDim, b.inkDim, t),
-          mix(a.inkMute, b.inkMute, t), mix(a.accent, b.accent, t), mix(a.rain, b.rain, t), mix(a.hair, b.hair, t),
-          mix(a.glow, b.glow, t),       t < 0.5f ? a.dark : b.dark};
-}
-
-// Sky palettes through the day. Each one is designed on its own for contrast (ink >= 7:1, dim ink and small
-// labels >= 4.5:1, accent and rain >= 3:1 against both sky colours), and the day only ever blends between two
-// palettes of the same polarity. That is what the old single dark<->light crossfade got wrong: halfway through
-// it (18:30) the sky and the ink were the same grey.
-namespace Sky {
-constexpr Palette Night{{13, 20, 29},   {10, 15, 22},    {238, 243, 249},     {125, 138, 160},    {120, 132, 154},
-                        {240, 182, 94}, {111, 177, 227}, {255, 255, 255, 23}, {240, 182, 94, 26}, true};
-constexpr Palette BlueHour{{20, 24, 56},    {56, 32, 70},    {240, 238, 250},     {164, 160, 198},     {158, 154, 194},
-                           {255, 170, 140}, {130, 180, 240}, {255, 255, 255, 23}, {255, 150, 170, 34}, true};
-constexpr Palette Dawn{{253, 226, 214}, {250, 240, 222}, {38, 26, 40},     {104, 84, 98},       {112, 94, 106},
-                       {190, 86, 56},   {40, 100, 170},  {38, 26, 40, 31}, {255, 170, 150, 60}, false};
-constexpr Palette Day{{222, 236, 250}, {240, 243, 247}, {18, 24, 33},     {80, 92, 110},       {88, 98, 114},
-                      {170, 104, 18},  {36, 104, 172},  {18, 24, 33, 31}, {255, 255, 255, 70}, false};
-constexpr Palette Golden{{255, 212, 160}, {255, 236, 200}, {44, 26, 16},     {110, 76, 56},      {116, 84, 64},
-                         {176, 66, 26},   {36, 90, 156},   {44, 26, 16, 31}, {255, 170, 90, 60}, false};
-constexpr Palette Dusk{{34, 26, 70},   {92, 36, 58},    {244, 238, 242},     {196, 180, 198},    {186, 170, 190},
-                       {255, 150, 90}, {140, 185, 245}, {255, 255, 255, 23}, {255, 120, 80, 38}, true};
-} // namespace Sky
-
-struct SunTimes {
-  std::time_t sunrise = 0, sunset = 0;
-};
-
-// Sky palette for `now`, keyed to the real sunrise and sunset. Blends are smooth within a polarity; the one flip
-// per sunrise and sunset is handled by a short fade in the renderer.
-Palette skyPalette(std::time_t now, SunTimes sun) {
-  constexpr std::time_t min = 60;
-  struct Key {
-    std::time_t t;
-    const Palette *p;
-  };
-  const std::array<Key, 8> keys{{
-      {sun.sunrise - 75 * min, &Sky::Night},
-      {sun.sunrise - 20 * min, &Sky::BlueHour},
-      {sun.sunrise, &Sky::Dawn},
-      {sun.sunrise + 90 * min, &Sky::Day},
-      {sun.sunset - 100 * min, &Sky::Day},
-      {sun.sunset - 30 * min, &Sky::Golden},
-      {sun.sunset, &Sky::Dusk},
-      {sun.sunset + 80 * min, &Sky::Night},
-  }};
-  if (now < keys.front().t || now >= keys.back().t) return Sky::Night;
-  for (std::size_t i = 0; i + 1 < keys.size(); ++i) {
-    const Key &a = keys[i], &b = keys[i + 1];
-    if (now >= b.t) continue;
-    if (a.p->dark != b.p->dark) return *a.p; // hold until the flip at sunrise / sunset
-    const float t = (float)(now - a.t) / (float)std::max<std::time_t>(1, b.t - a.t);
-    return mixPalette(*a.p, *b.p, t);
-  }
-  return Sky::Night;
-}
 
 // ------------------------------------------------------------- weather ----
 
@@ -255,6 +179,16 @@ std::time_t fakeTimeOffset() {
   return offset;
 }
 std::time_t now() { return std::time(nullptr) + fakeTimeOffset(); }
+
+// Debug: APP_FAKE_WEATHER=<WMO code> shows that weather, e.g. 0 clear, 3 overcast, 45 fog, 63 rain, 75 snow,
+// 95 thunderstorm.
+int fakeWeatherCode() {
+  static const int code = [] {
+    const char *env = SDL_getenv("APP_FAKE_WEATHER");
+    return env ? SDL_atoi(env) : -1;
+  }();
+  return code;
+}
 #else
 std::time_t now() { return std::time(nullptr); }
 #endif
@@ -309,6 +243,22 @@ struct WeatherState {
   std::vector<float> rain;   // precipitation mm per 15-min step, starting ~now
   std::vector<SunTimes> sun; // one entry per forecast day
 };
+
+#ifdef APP_DEBUG
+// A plausible forecast for APP_FAKE_WEATHER, so the whole screen can be checked without a network.
+WeatherState fakeWeather(int code) {
+  WeatherState w;
+  w.valid = true;
+  w.temperature = 14;
+  w.windspeed = 5;
+  w.weathercode = code;
+  w.advice = basicAdvice(w.temperature);
+  const WeatherLook look = weatherLook(code, 5, 0);
+  for (float mm : {0.3f, 0.7f, 1.1f, 1.3f, 0.9f, 0.5f, 0.2f, 0.0f})
+    w.rain.push_back(mm * look.c.rain);
+  return w;
+}
+#endif
 
 // ------------------------------------------------------------- helpers ----
 
@@ -413,71 +363,6 @@ struct TrackedLabel {
   }
 };
 
-// ------------------------------------------------------------ painting ----
-
-// The sky is composed on the CPU into one opaque half-resolution image: vertical gradient, the soft glow from the
-// mockup, and a "painted canvas" of broad brush strokes. It is re-composed once a minute (a few ms on a Pi 3) and
-// drawn as a single opaque, linearly scaled quad per frame, which is cheaper than drawing the layers separately.
-constexpr int kSkyW = Config::screen_width / 2, kSkyH = Config::screen_height / 2;
-
-// Brush strokes as a field from -1 (dark stroke) to +1 (light stroke): mostly horizontal sweeps with bristle
-// streaks. Neutral, so the same strokes brush every sky palette. Fixed seed: the same canvas on every start.
-std::vector<float> makeCanvasField(int w, int h) {
-  std::vector<float> paint((std::size_t)w * h, 0.0f);
-  std::mt19937 rng(20260924u); // fixed seed: the same canvas every start
-  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
-
-  const int strokes = w * h / 220;
-  for (int i = 0; i < strokes; ++i) {
-    const float cx = unit(rng) * w, cy = unit(rng) * h;
-    const float halfLen = 18.0f + unit(rng) * 55.0f, halfWid = 2.5f + unit(rng) * 5.5f;
-    const float angle = (unit(rng) - 0.5f) * 0.35f + 0.12f * std::sin(cy * 0.03f); // a sky painter's sweep
-    const float value = (unit(rng) - 0.5f) * 2.0f;
-    const float phase = unit(rng) * 6.28f;
-    const float c = std::cos(angle), sn = std::sin(angle);
-    const float ex = std::abs(c) * halfLen + std::abs(sn) * halfWid,
-                ey = std::abs(sn) * halfLen + std::abs(c) * halfWid;
-    const int x0 = std::max(0, (int)(cx - ex)), x1 = std::min(w - 1, (int)(cx + ex) + 1);
-    const int y0 = std::max(0, (int)(cy - ey)), y1 = std::min(h - 1, (int)(cy + ey) + 1);
-    for (int y = y0; y <= y1; ++y) {
-      for (int x = x0; x <= x1; ++x) {
-        const float dx = x - cx, dy = y - cy;
-        const float u = (dx * c + dy * sn) / halfLen, v = (dy * c - dx * sn) / halfWid;
-        const float d = u * u + v * v;
-        if (d >= 1.0f) continue;
-        const float bristle = 0.6f + 0.4f * std::sin(v * 9.0f + phase); // streaks along the stroke
-        const float alpha = 0.55f * std::min(1.0f, (1.0f - d) * 3.0f) * bristle;
-        float &px = paint[(std::size_t)y * w + x];
-        px += (value - px) * alpha;
-      }
-    }
-  }
-
-  return paint;
-}
-
-void bakeSky(const Palette &p, const std::vector<float> &canvas, SDL_Surface *out) {
-  constexpr float strokeStrength = 16.0f / 255.0f; // blend weight of a full-strength stroke
-  const int w = out->w, h = out->h;
-  // Glow: radial-gradient(120% 80% at 50% 12%, glow, transparent 60%), in half-resolution pixels.
-  const float gx = w * 0.5f, gy = h * 0.12f, grx = w * 1.2f * 0.6f, gry = h * 0.8f * 0.6f;
-  for (int y = 0; y < h; ++y) {
-    auto *row = (Uint8 *)out->pixels + (std::size_t)y * out->pitch;
-    const Col bg = mix(p.bg0, p.bg1, (y + 0.5f) / h);
-    for (int x = 0; x < w; ++x) {
-      const float dx = (x - gx) / grx, dy = (y - gy) / gry;
-      const float glow = std::max(0.0f, 1.0f - std::sqrt(dx * dx + dy * dy)) * p.glow.a / 255.0f;
-      Col c = mix(bg, p.glow, glow);
-      const float stroke = canvas[(std::size_t)y * w + x];
-      c = mix(c, stroke > 0 ? Col{255, 255, 255} : Col{0, 0, 0}, std::abs(stroke) * strokeStrength);
-      row[x * 4 + 0] = (Uint8)std::clamp(c.r, 0.0f, 255.0f);
-      row[x * 4 + 1] = (Uint8)std::clamp(c.g, 0.0f, 255.0f);
-      row[x * 4 + 2] = (Uint8)std::clamp(c.b, 0.0f, 255.0f);
-      row[x * 4 + 3] = 255;
-    }
-  }
-}
-
 float relativeLuminance(Col c) {
   auto lin = [](float v) {
     v /= 255.0f;
@@ -493,24 +378,51 @@ float contrast(Col a, Col b) {
 }
 
 #ifdef APP_DEBUG
-// Walks the sky through a whole day, minute by minute, and logs any moment where text would be hard to read.
+// Everything a palette has to be readable against, for text at its place on screen. Clouds are checked at full
+// strength and the sky both with and without the glow, so the partial layers in between are covered.
+std::string contrastProblems(const Palette &p) {
+  std::string out;
+  auto need = [&](const char *what, Col ink, Col bg, float min) {
+    const float c = contrast(ink, bg);
+    if (c < min) out += std::format(" {} {:.1f}<{:.1f}", what, c, min);
+  };
+  auto withGlow = [&](Col c) { return mix(c, p.glow, p.glow.a / 255.0f); };
+  for (const Col &bg : {skyAt(p, 70), withGlow(skyAt(p, 70)), p.cloudLit, p.cloudShade}) { // date
+    need("date", p.inkDim, bg, 4.5f);
+    need("date-dot", p.accent, bg, 3.0f);
+  }
+  for (const Col &bg : {skyAt(p, 150), withGlow(skyAt(p, 150)), skyAt(p, 300), p.cloudLit, p.cloudShade}) // time
+    need("time", p.ink, bg, 7.0f);
+  for (const Col &bg : {skyAt(p, 362), p.far}) // where the feet of the digits meet the mountains
+    need("time-feet", p.ink, bg, 4.5f);
+  for (const Col &bg : {skyAt(p, 200), skyAt(p, 300)})
+    need("colon", p.accent, bg, 3.0f);
+  for (const Col &bg : {nearAt(p, 400), nearAt(p, 590)}) { // weather strip and rain chart
+    need("land-ink", Land::ink, bg, 7.0f);
+    need("land-dim", Land::inkDim, bg, 4.5f);
+    need("land-mute", Land::inkMute, bg, 4.5f);
+    need("bars", p.bars, bg, 4.5f);
+  }
+  return out;
+}
+
+// Walks every kind of weather through a whole day, minute by minute, and logs any moment where text would be hard
+// to read.
 void verifySkyContrast(SunTimes sun) {
   int failures = 0;
-  for (std::time_t t = sun.sunrise - 12 * 3600; t < sun.sunrise + 36 * 3600 && failures < 10; t += 60) {
-    const Palette p = skyPalette(t, sun);
-    for (const Col &bg : {p.bg0, p.bg1}) {
-      const float ink = contrast(p.ink, bg), dim = contrast(p.inkDim, bg), mute = contrast(p.inkMute, bg);
-      const float accent = contrast(p.accent, bg), rain = contrast(p.rain, bg);
-      if (ink < 7.0f || dim < 4.5f || mute < 4.5f || accent < 3.0f || rain < 3.0f) {
-        const std::tm tm = localTime(t);
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Low contrast at %02d:%02d: ink %.1f dim %.1f mute %.1f accent %.1f rain %.1f", tm.tm_hour,
-                    tm.tm_min, ink, dim, mute, accent, rain);
-        ++failures;
-      }
+  for (WeatherKind kind : {WeatherKind::Clear, WeatherKind::Grey, WeatherKind::Storm}) {
+    std::string last;
+    for (std::time_t t = sun.sunrise - 12 * 3600; t < sun.sunrise + 36 * 3600 && failures < 20; t += 60) {
+      const std::string problems = contrastProblems(skyPalette(t, sun, worldsFor(kind)));
+      if (problems.empty() || problems == last) continue;
+      last = problems;
+      const std::tm tm = localTime(t);
+      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Low contrast, weather %d at %02d:%02d:%s", (int)kind, tm.tm_hour,
+                  tm.tm_min, problems.c_str());
+      ++failures;
     }
   }
-  if (failures == 0) SDL_Log("Sky contrast OK for every minute of the day");
+  if (failures == 0) SDL_Log("Sky contrast OK for every kind of weather and every minute of the day");
 }
 #endif
 
@@ -547,8 +459,8 @@ public:
     if (!SDL_SetRenderVSync(renderer.get(), 1)) {
       SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't enable vsync: %s", SDL_GetError());
     }
-    // Only the colon pulse moves, and it is slow: 20 frames a second is smooth and leaves the Pi mostly idle.
-    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "20");
+    // The scene is always gently moving (clouds, rain, leaves); 30 frames a second is smooth for all of it.
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "30");
 
     if (!TTF_Init()) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL_ttf: %s", SDL_GetError());
@@ -576,14 +488,8 @@ public:
     approx = TTF_FontHasGlyph(fRainCap.get(), 0x2248) ? "\xE2\x89\x88" : "~";      // ≈
 
     LoadIcons();
-    canvasField = makeCanvasField(kSkyW, kSkyH);
-    skySurface.reset(SDL_CreateSurface(kSkyW, kSkyH, SDL_PIXELFORMAT_RGBA32));
-    for (auto &tex : skyTex) {
-      tex.reset(SDL_CreateTexture(renderer.get(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, kSkyW, kSkyH));
-      if (tex) SDL_SetTextureScaleMode(tex.get(), SDL_SCALEMODE_LINEAR);
-    }
-    if (!skySurface || !skyTex[0] || !skyTex[1]) {
-      SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't create sky textures: %s", SDL_GetError());
+    if (!scene.Init(renderer.get())) {
+      SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't create scene textures: %s", SDL_GetError());
       return false;
     }
 #ifdef APP_DEBUG
@@ -627,23 +533,22 @@ private:
 
   std::mutex weatherMutex;
   WeatherState weather;
-  SunTimes lastSun; // kept across failed fetches: sun times do not go stale within the day
+  SunTimes lastSun;     // kept across failed fetches: sun times do not go stale within the day
+  WeatherLook lastLook; // likewise the scene's weather, so a network blip does not clear the sky
 
-  // Sky: two streaming textures so the dark <-> light flip at sunrise and sunset can crossfade between them.
-  std::vector<float> canvasField;
-  SurfacePtr skySurface;
-  std::array<TexturePtr, 2> skyTex;
-  int skyCur = 0;
-  std::time_t skyBakedMinute = -1;
-  bool skyBakedDark = true;
+  Scene scene;
 
-  // Text colours fade along with the sky during a flip.
-  Palette shown = Sky::Night;
+  // The palette on screen fades to a new target: quickly when the sky flips between dark and light (sunrise,
+  // sunset, a storm rolling in), slowly when the weather changes within the same polarity.
+  Palette shown = Worlds::Clear.night;
+  WeatherKind shownKind = WeatherKind::Clear;
   bool haveShown = false;
-  Palette flipFrom;
-  Uint64 flipStartMs = 0;
-  bool flipping = false;
+  Palette fadeFrom;
+  Uint64 fadeStartMs = 0;
+  float fadeMs = 0;
+  bool fading = false;
   static constexpr float kFlipMs = 2500.0f;
+  static constexpr float kWeatherFadeMs = 12000.0f;
 
   const char *shotPath = nullptr;
   int shotFrame = 180;
@@ -866,12 +771,16 @@ private:
     }
     if (lastSun.sunrise == 0 || localTime(lastSun.sunrise).tm_yday != tm.tm_yday) lastSun = defaultSunTimes();
     const bool isDay = t >= lastSun.sunrise && t < lastSun.sunset;
-    const Palette target = skyPalette(t, lastSun);
-    const Palette p = CurrentPalette(target);
-    DrawSky(target, t);
+
+#ifdef APP_DEBUG
+    if (const int fake = fakeWeatherCode(); fake >= 0) w = fakeWeather(fake);
+#endif
+    if (w.valid) lastLook = weatherLook(w.weathercode, (float)w.windspeed, w.rain.empty() ? 0.0f : w.rain.front());
+    const Palette p = CurrentPalette(skyPalette(t, lastSun, worldsFor(lastLook.kind)), lastLook.kind);
+    scene.Draw(renderer.get(), p, lastLook.c, t, lastSun, (double)SDL_GetTicksNS() / 1e9);
     DrawDate(tm, p);
     DrawTime(tm, p);
-    DrawWeatherStrip(w, isDay, p);
+    DrawWeatherStrip(w, isDay);
     DrawRain(w, p);
 
     if (shotPath && frameCount + 1 >= shotFrame) {
@@ -883,48 +792,23 @@ private:
     SDL_RenderPresent(renderer.get());
   }
 
-  // Re-composes the sky once a minute (the palette drifts slowly) and immediately when it flips polarity; the
-  // previous sky stays on the other texture and is faded out while the flip lasts.
-  void DrawSky(const Palette &target, std::time_t t) {
-    const std::time_t minute = t / 60;
-    const bool flip = skyBakedMinute >= 0 && target.dark != skyBakedDark;
-    if (minute != skyBakedMinute || flip) {
-      if (flip) skyCur ^= 1; // keep the old sky for the crossfade
-      bakeSky(target, canvasField, skySurface.get());
-      SDL_UpdateTexture(skyTex[skyCur].get(), nullptr, skySurface->pixels, skySurface->pitch);
-      skyBakedMinute = minute;
-      skyBakedDark = target.dark;
-    }
-    const SDL_FRect full{0, 0, (float)Config::screen_width, (float)Config::screen_height};
-    SDL_Texture *cur = skyTex[skyCur].get();
-    if (flipping) {
-      SDL_Texture *prev = skyTex[skyCur ^ 1].get();
-      SDL_SetTextureBlendMode(prev, SDL_BLENDMODE_NONE);
-      SDL_RenderTexture(renderer.get(), prev, nullptr, &full);
-      SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_BLEND);
-      SDL_SetTextureAlphaModFloat(cur, std::clamp((float)(SDL_GetTicks() - flipStartMs) / kFlipMs, 0.0f, 1.0f));
-    } else {
-      SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_NONE); // opaque: cheapest full-screen draw
-    }
-    SDL_RenderTexture(renderer.get(), cur, nullptr, &full);
-  }
-
-  // Applies the short fade when the sky flips between dark and light, so there is never a long grey-on-grey phase.
-  Palette CurrentPalette(const Palette &target) {
+  Palette CurrentPalette(const Palette &target, WeatherKind kind) {
     const Uint64 ticks = SDL_GetTicks();
-    if (haveShown && target.dark != shown.dark && !flipping) {
-      flipFrom = shown;
-      flipStartMs = ticks;
-      flipping = true;
+    if (haveShown && (target.dark != shown.dark || kind != shownKind)) {
+      fadeFrom = shown;
+      fadeStartMs = ticks;
+      fadeMs = target.dark != shown.dark ? kFlipMs : kWeatherFadeMs;
+      fading = true;
     }
     haveShown = true;
+    shownKind = kind;
     Palette p = target;
-    if (flipping) {
-      const float k = std::clamp((float)(ticks - flipStartMs) / kFlipMs, 0.0f, 1.0f);
+    if (fading) {
+      const float k = std::clamp((float)(ticks - fadeStartMs) / fadeMs, 0.0f, 1.0f);
       if (k >= 1.0f)
-        flipping = false;
+        fading = false;
       else
-        p = mixPalette(flipFrom, target, k * k * (3.0f - 2.0f * k));
+        p = mixPalette(fadeFrom, target, smooth01(k));
     }
     shown = p;
     shown.dark = target.dark;
@@ -962,7 +846,7 @@ private:
     lMM.drawBase(renderer.get(), x, base, p.ink);
   }
 
-  void DrawWeatherStrip(const WeatherState &w, bool isDay, const Palette &p) {
+  void DrawWeatherStrip(const WeatherState &w, bool isDay) {
     const float B = Config::strip_baseline;
     std::string tempStr = w.valid ? std::format("{:.0f}", w.temperature) : "--";
     std::string windStr = w.valid ? std::format("{:.0f}", w.windspeed) : "--";
@@ -976,31 +860,31 @@ private:
     Icon cond = w.valid ? iconFor(w.weathercode, isDay) : Icon::Cloudy;
     float tIcon = 40.0f;
     float numCenter = B - lTempNum.ascent * 0.36f; // rough optical centre of the figures
-    drawIcon(cond, x, numCenter - tIcon / 2.0f, tIcon, p.inkDim);
+    drawIcon(cond, x, numCenter - tIcon / 2.0f, tIcon, Land::inkDim);
     x += tIcon + 16.0f;
-    lTempNum.drawBase(renderer.get(), x, B, p.ink);
+    lTempNum.drawBase(renderer.get(), x, B, Land::ink);
     x += lTempNum.w + 6.0f;
-    lTempUnit.drawBase(renderer.get(), x, B, p.inkDim);
+    lTempUnit.drawBase(renderer.get(), x, B, Land::inkDim);
     x += lTempUnit.w;
 
     // divider
     float divTop = B - 34.0f, divBot = B + 6.0f;
     float d1 = x + 30.0f;
-    fillRect(d1, divTop, 1.0f, divBot - divTop, p.hair);
+    fillRect(d1, divTop, 1.0f, divBot - divTop, Land::hair);
 
     // --- wind cell: [wind icon] N m/s ---
     x = d1 + 30.0f;
     float wIcon = 27.0f;
     float wNumCenter = B - lWindNum.ascent * 0.36f;
-    drawIcon(Icon::Wind, x, wNumCenter - wIcon / 2.0f, wIcon, p.inkDim);
+    drawIcon(Icon::Wind, x, wNumCenter - wIcon / 2.0f, wIcon, Land::inkDim);
     x += wIcon + 12.0f;
-    lWindNum.drawBase(renderer.get(), x, B, p.ink);
+    lWindNum.drawBase(renderer.get(), x, B, Land::ink);
     x += lWindNum.w + 5.0f;
-    lWindUnit.drawBase(renderer.get(), x, B, p.inkDim);
+    lWindUnit.drawBase(renderer.get(), x, B, Land::inkDim);
     x += lWindUnit.w;
 
     float d2 = x + 30.0f;
-    fillRect(d2, divTop, 1.0f, divBot - divTop, p.hair);
+    fillRect(d2, divTop, 1.0f, divBot - divTop, Land::hair);
 
     // --- advice cell: cursive, right-aligned, fills remaining width ---
     float adviceRight = Config::screen_width - Config::pad_x;
@@ -1009,7 +893,7 @@ private:
     if (lAdvice.tex) {
       float ax = adviceRight - lAdvice.w;
       float ay = (numCenter)-lAdvice.h / 2.0f + 4.0f;
-      lAdvice.drawTop(renderer.get(), ax, ay, p.ink);
+      lAdvice.drawTop(renderer.get(), ax, ay, Land::ink);
     }
   }
 
@@ -1032,7 +916,7 @@ private:
     if (!w.valid || !hasRain) {
       std::string msg = w.valid ? "No rain expected \xC2\xB7 next 2h" : "Checking the sky\xE2\x80\xA6";
       lRainDry.set(renderer.get(), fRainCap.get(), msg);
-      lRainDry.drawBase(renderer.get(), left + (CW - lRainDry.w) / 2.0f, Config::rain_chart_top + 24.0f, p.inkDim);
+      lRainDry.drawBase(renderer.get(), left + (CW - lRainDry.w) / 2.0f, Config::rain_chart_top + 24.0f, Land::inkDim);
       return;
     }
 
@@ -1042,11 +926,11 @@ private:
     std::string cap = mins <= 0 ? std::format("{} rain{}peak now", word, mdot)
                                 : std::format("{} rain{}peak in {}{} min", word, mdot, approx, mins);
     lRainCap.set(renderer.get(), fRainCap.get(), cap);
-    lRainCap.drawBase(renderer.get(), left, Config::rain_cap_baseline, p.rain);
+    lRainCap.drawBase(renderer.get(), left, Config::rain_cap_baseline, p.bars);
 
     // bars
     const float chartBottom = Config::rain_chart_top + Config::rain_chart_h;
-    fillRect(left, chartBottom, CW, 1.0f, p.hair);
+    fillRect(left, chartBottom, CW, 1.0f, Land::hair);
     std::size_t n = w.rain.size();
     if (n == 0) return;
     const float gap = 6.0f;
@@ -1055,16 +939,16 @@ private:
     for (std::size_t i = 0; i < n; ++i) {
       float hh = std::clamp(w.rain[i] / scale, 0.0f, 1.0f) * (Config::rain_chart_h - 1.0f);
       if (hh < 1.0f) continue;
-      fillRect(left + i * (bw + gap), chartBottom - hh, bw, hh, p.rain);
+      fillRect(left + i * (bw + gap), chartBottom - hh, bw, hh, p.bars);
     }
 
     // axis
     lAxisNow.set(renderer.get(), fAxis.get(), "NOW");
     lAxisMid.set(renderer.get(), fAxis.get(), "+1H");
     lAxisEnd.set(renderer.get(), fAxis.get(), "+2H");
-    lAxisNow.drawBase(renderer.get(), left, Config::rain_axis_baseline, p.inkMute);
-    lAxisMid.drawBase(renderer.get(), left + (CW - lAxisMid.w) / 2.0f, Config::rain_axis_baseline, p.inkMute);
-    lAxisEnd.drawBase(renderer.get(), right - lAxisEnd.w, Config::rain_axis_baseline, p.inkMute);
+    lAxisNow.drawBase(renderer.get(), left, Config::rain_axis_baseline, Land::inkMute);
+    lAxisMid.drawBase(renderer.get(), left + (CW - lAxisMid.w) / 2.0f, Config::rain_axis_baseline, Land::inkMute);
+    lAxisEnd.drawBase(renderer.get(), right - lAxisEnd.w, Config::rain_axis_baseline, Land::inkMute);
   }
 };
 

@@ -121,22 +121,37 @@ and Auth Bearer <auth_token> header. It would return a JSON object with the foll
 To get your editor pick up on dependencies headers, compile your project once in debug mode.
 Then run `ln -s build/debug/compile_commands.json` in the root of your project and restart clangd.
 
-# Sky colours
+# Animated background
 
-The background follows the real sunrise and sunset from the forecast (`daily=sunrise,sunset`; 07:00 and 19:00
-until the first fetch succeeds): night → blue hour → dawn → day → golden hour → dusk → night. Each palette in
-`namespace Sky` is designed for contrast on its own (ink ≥ 7:1, dim ink and small labels ≥ 4.5:1, accent and
-rain ≥ 3:1), and colours only blend between palettes of the same polarity. The single dark ↔ light flip at
-sunrise and sunset is a 2.5 s crossfade. Debug builds walk every minute of the day at startup and log any
-moment below those contrast targets.
+`scene.h` draws an animated landscape behind the text: a sky gradient with a soft glow, the sun on an arc from
+sunrise to sunset, the moon and twinkling stars (and the odd shooting star) at night, drifting clouds, far
+mountains, mid hills with twinkling town lights, near hills, and leaves swaying in the bottom corners. The hill
+layers sway sideways very slowly, each by an amount proportional to its nearness (parallax). A fixed "painted
+canvas" of brush strokes lies over everything but the text.
 
-The sky (gradient, glow and a fixed "painted canvas" of brush strokes) is composed on the CPU once a minute at
-half resolution and drawn as one opaque texture, so a frame is just that quad plus the text. The app iterates at
-20 Hz, which is enough for the colon pulse.
+Its colours come from one of eighteen palettes ("worlds"): six times of day (night, blue hour, dawn, day, golden
+hour, dusk, keyed to the real sunrise and sunset from the forecast, 07:00 and 19:00 until the first fetch
+succeeds) for each of three kinds of weather (clear, grey, storm), picked from the WMO weather code. Within a kind
+the palettes blend smoothly through the day. The particles — cloud cover, rain, snow, fog and lightning — ease in
+and out over a few seconds when the forecast changes, and a change of kind fades the palette over 12 s.
+
+Readability: the date and time sit on the sky, and the weather strip and rain chart on the near hills, which are
+dark in every world, so that text is always light. Each palette is designed for contrast on its own (ink ≥ 7:1, dim
+ink and small labels ≥ 4.5:1, accents ≥ 3:1, against the sky, the glow, the clouds and, for the feet of the
+digits, the mountains), and colours only blend between palettes of the same polarity. A flip between a light and a
+dark sky (sunrise, sunset, a storm rolling in) is a 2.5 s fade. Debug builds walk every minute of the day for every
+kind of weather at startup and log any moment below those targets.
+
+Everything is drawn on the GPU as about twenty batched `SDL_RenderGeometry` calls over a few small sprites baked at
+startup (soft dot, glow, sun disc, crescent, three clouds, the canvas). The app iterates at 30 Hz.
 
 Debug-build helpers:
 
 ```sh
-APP_FAKE_TIME=18:30 ./build/debug/digital_clock_v3             # pretend it is 18:30 today
+APP_FAKE_TIME=18:30 ./build/debug/digital_clock_v3                  # pretend it is 18:30 today
+APP_FAKE_WEATHER=95 ./build/debug/digital_clock_v3                  # pretend a WMO weather code (0 clear, 3 overcast,
+                                                                    # 45 fog, 63 rain, 75 snow, 95 thunderstorm)
 APP_SHOT=shot.png APP_SHOT_FRAME=40 ./build/debug/digital_clock_v3  # save a frame and exit
 ```
+
+Screenshots work headless with `SDL_VIDEO_DRIVER=offscreen SDL_RENDER_DRIVER=software`.
