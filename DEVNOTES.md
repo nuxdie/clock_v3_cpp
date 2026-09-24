@@ -30,6 +30,27 @@ would return JSON, that looks like:
 
 There's a mock server for this API in `./bing-feed-local-mock-server`. Use it for development.
 
+In debug builds you can also paint a local photo without any network access:
+
+```sh
+CLOCK_TEST_IMAGE=/path/to/photo.jpg ./build/debug/digital_clock_v3
+```
+
+# Painted background
+
+Every downloaded photo is turned into a painting once, on a low-priority worker thread (`Painter::paint`):
+cover-crop to the screen size, a blurry underpainting, three layers of brush strokes that follow the edges of the
+photo (Hertzmann-style painterly rendering), then colour grading: more saturation, the brightest 10% capped so
+the text always stands out, a soft vignette and a faint canvas grain. The two strongest hues of the result
+become the colours of the hours and minutes. Until the first photo arrives (or with no network), a generated
+abstract canvas is painted instead.
+
+All of this is CPU work done once per picture (~0.3 s on a desktop, a few seconds on a Raspberry Pi 3). Rendering
+itself is one full-screen texture plus the text textures, and a frame is only drawn when something changed
+(minute tick, weather update, new painting fading in), so the GPU and CPU stay idle almost all the time.
+
+Text has a dark outline baked into its texture, so it is readable on any part of any picture.
+
 # Weather API
 
 https://api.open-meteo.com/v1/forecast?latitude=52.3738&longitude=4.8910&current_weather=true&windspeed_unit=ms&timezone=auto
