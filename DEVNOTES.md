@@ -116,6 +116,33 @@ and Auth Bearer <auth_token> header. It would return a JSON object with the foll
 }
 ```
 
+# Calendar (iCal feeds)
+
+`CALENDAR_URL` holds one or more iCalendar feed URLs (space-separated; `webcal://` works too), fetched every
+10 minutes by their own thread. `calendar.h` reads `VEVENT`s — `DTSTART`, `DTEND`/`DURATION`, `SUMMARY`, `STATUS`,
+`RRULE` (DAILY, WEEKLY, MONTHLY, YEARLY with INTERVAL, COUNT, UNTIL, BYDAY incl. `2TU`/`-1FR`, BYMONTHDAY), `EXDATE`
+and `RECURRENCE-ID` overrides — and expands recurring events over the next few days. Times with a `TZID` are read as
+the clock's local time. All-day events are not shown: they have no place on a time scale.
+
+# Event horizon
+
+The bottom of the screen is one timeline for the next four hours (`horizon.h` builds it, `DrawHorizon` draws it):
+
+- rain and snow periods from the 15-minute forecast (`minutely_15` precipitation and snowfall) as a band on the line,
+  thicker where it falls harder, with a caption: "Rain until 17:00", "Light snow from 14:15", "Rain 14:15–15:30";
+- sunrise and sunset, from `astro.h`;
+- the next three timed events: an icon (a handset for calls, a calendar page otherwise), the title and the time.
+  When none falls inside the four hours, the next one within a day and a half waits at the far end
+  ("Tomorrow 08:30").
+
+Markers grow and brighten as their event comes closer, and glow softly in its last half hour. Labels that would
+overlap give way, in the order events, weather, sun; their markers stay. The timeline fades in only when there is
+rain, snow or an event on it — a dry day with nothing planned keeps the bottom of the screen clear.
+
+```sh
+APP_FAKE_EVENTS="20:00 Dinner;22:30 Call with Mum" ./build/debug/digital_clock_v3  # events at their next such time
+```
+
 # clangd LSP Integration
 
 To get your editor pick up on dependencies headers, compile your project once in debug mode.
@@ -156,7 +183,7 @@ forecast ─────► clouds, rain, fog, wind ─┘   (scene_state.h)  �
   drift (direction and speed), the rain's slant, how much the lake blurs its reflections, and how hard the pines and
   reeds sway — barely at a breeze, clearly in a gale.
 
-Readability: the date, the time and the condition sit on the sky; the weather row, the advice and the rain timeline
+Readability: the date, the time and the condition sit on the sky; the weather row, the advice and the event horizon
 on the land, which is kept dark at every hour. `textThemeFor` samples what lies behind each piece of text (sky at
 several heights, the horizon glow, clouds at full strength, the mountains behind the feet of the digits, the hills,
 the ground, mist) and picks light or dark ink for the sky text (with hysteresis; a flip fades over 2 s). Where the

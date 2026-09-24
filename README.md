@@ -23,6 +23,12 @@ libcurl4-openssl-dev
 
 Set the `GROQ_API_KEY` environment variable to your Groq API key if you want to get clothing advice from the Groq API.
 
+Set `CALENDAR_URL` to an iCal feed to see your upcoming events on the event horizon, the timeline along the bottom of
+the screen (for Google Calendar: Settings → your calendar → Integrate calendar → *Secret address in iCal format*).
+Several feeds can be given, separated by spaces. Like `GROQ_API_KEY` it is baked in at build time; setting it at run
+time (e.g. `Environment=CALENDAR_URL=...` in the systemd service) overrides that. The address is secret: anyone who has
+it can read the calendar, so keep it out of the repository.
+
 # Building
 
 Run `cmake --preset release` to generate the build system and `cmake --build --preset release` to build the project.
