@@ -114,7 +114,12 @@ if(NOT GROQ_API_KEY)
     message(WARNING "GROQ_API_KEY not found in environment. LLM features will not work.")
     set(GROQ_API_KEY "MISSING_KEY")
 endif()
+# Calendar feeds for the event horizon (optional, space-separated iCal URLs); CALENDAR_URL at run time overrides it.
+if(NOT DEFINED CALENDAR_URL)
+    set(CALENDAR_URL $ENV{CALENDAR_URL})
+endif()
 target_compile_definitions(digital_clock_v3 PRIVATE
     $<$<CONFIG:Debug>:APP_DEBUG>
     GROQ_API_KEY="${GROQ_API_KEY}"
+    CALENDAR_URL="${CALENDAR_URL}"
 )

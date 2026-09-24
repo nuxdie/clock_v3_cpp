@@ -25,7 +25,7 @@ constexpr int height = 600;
 
 // Where things sit on screen (logical pixels).
 namespace Layout {
-// Text. The date and the time sit on the sky; the weather row, the advice and the rain timeline on the land.
+// Text. The date and the time sit on the sky; the weather row, the advice and the event horizon on the land.
 constexpr float padX = 48.0f;
 constexpr float dateBaseline = 60.0f;
 constexpr float timeSize = 250.0f;
@@ -33,9 +33,10 @@ constexpr float timeBaseline = 294.0f;
 constexpr float timeTop = 118.0f; // top of the digits
 constexpr float stripBaseline = 368.0f;
 constexpr float adviceBaseline = 410.0f;
-constexpr float rainCapBaseline = 524.0f;
-constexpr float rainBarY = 546.0f;
-constexpr float rainAxisBaseline = 576.0f;
+constexpr float horizonTitleBaseline = 514.0f; // event horizon: a mark's title,
+constexpr float horizonWhenBaseline = 532.0f;  // its time (and the rain and snow captions),
+constexpr float horizonLineY = 550.0f;         // the time scale,
+constexpr float horizonAxisBaseline = 578.0f;  // and NOW .. +4H
 
 // Landscape, back to front.
 constexpr float skyMidY = 250.0f;                      // sky gradient stop (the top is at 0)
@@ -283,7 +284,7 @@ constexpr std::array kKeyColours{&SkyKey::skyTop, &SkyKey::skyMid,   &SkyKey::sk
 
 namespace Keys {
 // Field order: elevation / skyTop skyMid skyLow glow sun / cloudLit cloudShade / far near forest ground fore /
-// accent. The land from `near` forwards stays dark at every hour: the weather row and the rain timeline sit on it.
+// accent. The land from `near` forwards stays dark at every hour: the weather row and the event horizon sit on it.
 // clang-format off
 constexpr SkyKey kNight{-18,
     {6, 10, 30}, {14, 24, 62}, {34, 50, 104}, {80, 100, 190, 0}, {255, 200, 150},
@@ -491,7 +492,7 @@ struct TextTheme {
   float haloTime = 0, haloTop = 0;
   Col landInk{244, 246, 250}, landDim{208, 214, 226}, landMute{188, 196, 210}, landAccent;
   Col scrim{6, 8, 18}; // behind the land text
-  float scrimStrip = 0, scrimRain = 0;
+  float scrimStrip = 0, scrimHorizon = 0;
 };
 
 namespace Ink {
@@ -560,7 +561,7 @@ inline Backing backingFor(float need, float base) {
 struct Backdrops {
   Col top[4];  // date and condition
   Col time[8]; // the digits
-  Col strip[5], rain[4];
+  Col strip[5], horizon[4];
 };
 inline Backdrops backdropsFor(const Look &l, const SceneState &s) {
   const float cloudy = s.cloudiness > 0.02f ? 1.0f : 0.0f;
@@ -576,8 +577,8 @@ inline Backdrops backdropsFor(const Look &l, const SceneState &s) {
   const float fogBand = 0.45f * (1.0f - s.visibility);
   b.strip[0] = l.near, b.strip[1] = mix(l.near, l.forest, 0.6f), b.strip[2] = l.forest;
   b.strip[3] = mix(l.near, mist, fogBand), b.strip[4] = mix(l.forest, mist, fogBand);
-  b.rain[0] = l.ground, b.rain[1] = mix(l.ground, l.fore, 0.6f), b.rain[2] = l.fore;
-  b.rain[3] = mix(l.ground, mist, 0.5f * fogBand);
+  b.horizon[0] = l.ground, b.horizon[1] = mix(l.ground, l.fore, 0.6f), b.horizon[2] = l.fore;
+  b.horizon[3] = mix(l.ground, mist, 0.5f * fogBand);
   return b;
 }
 
@@ -612,13 +613,13 @@ inline TextTheme textThemeFor(const Look &l, const SceneState &s, bool wasLight)
   // Land text: always light ink, with a dark scrim only where the land is not dark enough on its own.
   t.landAccent = mix(l.accent, Col{255, 255, 255}, 0.35f);
   const auto &S = b.strip;
-  const auto &R = b.rain;
+  const auto &R = b.horizon;
   auto scrimFor = [&](std::initializer_list<Col> bgs) {
     return std::max({backingNeeded(t.landInk, t.scrim, bgs, Readability::landInk, 0.85f),
                      backingNeeded(t.landMute, t.scrim, bgs, Readability::text, 0.85f),
                      backingNeeded(t.landAccent, t.scrim, bgs, Readability::text, 0.85f)});
   };
   t.scrimStrip = scrimFor({S[0], S[1], S[2], S[3], S[4]});
-  t.scrimRain = scrimFor({R[0], R[1], R[2], R[3]});
+  t.scrimHorizon = scrimFor({R[0], R[1], R[2], R[3]});
   return t;
 }

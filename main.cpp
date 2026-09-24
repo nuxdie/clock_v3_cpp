@@ -18,6 +18,7 @@
 #include <ctime>
 #include <format>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -25,6 +26,8 @@
 
 #include "assets_fonts.h"
 #include "assets_icons.h"
+#include "calendar.h"
+#include "horizon.h"
 #include "scene.h"
 
 using json = nlohmann::json;
@@ -48,6 +51,14 @@ constexpr double longitude = 4.8910;
 constexpr const char *GroqApiKey = "";
 #else
 constexpr const char *GroqApiKey = GROQ_API_KEY;
+#endif
+
+// iCalendar feeds for the event horizon (e.g. Google Calendar's "secret address in iCal format"), separated by
+// spaces. Baked in from CALENDAR_URL at build time like the Groq key; a CALENDAR_URL set at run time wins.
+#ifndef CALENDAR_URL
+constexpr const char *CalendarUrl = "";
+#else
+constexpr const char *CalendarUrl = CALENDAR_URL;
 #endif
 } // namespace Config
 
@@ -230,7 +241,7 @@ struct WeatherState {
   double winddirection = 270; // degrees the wind comes from
   int weathercode = 0;
   std::string advice;
-  std::vector<float> rain; // precipitation mm per 15-min step, starting ~now
+  Horizon::Precip precip; // the next few hours of rain and snow, in 15-minute steps
 };
 
 #ifdef APP_DEBUG
@@ -248,9 +259,37 @@ WeatherState fakeWeather(int code) {
   w.advice = basicAdvice(w.temperature);
   SceneState s;
   applyWeather(s, {true, code, 5, 270, 0});
-  for (float mm : {0.3f, 0.7f, 1.1f, 1.3f, 0.9f, 0.5f, 0.2f, 0.0f})
-    w.rain.push_back(mm * s.rainIntensity);
+  const std::time_t t = now();
+  w.precip.from = t - t % Horizon::step;
+  for (float mm : {0.3f, 0.7f, 1.1f, 1.3f, 0.9f, 0.5f, 0.2f, 0.0f}) {
+    w.precip.mm.push_back(mm * (s.rainIntensity + s.snowIntensity));
+    w.precip.snow.push_back(s.snowIntensity > 0.0f);
+  }
   return w;
+}
+
+// Debug: APP_FAKE_EVENTS="20:00 Dinner;22:30 Call" puts those events at their next such time (today, or tomorrow
+// once it has passed), so the event horizon can be checked without a calendar.
+std::vector<Calendar::Event> fakeEvents() {
+  std::vector<Calendar::Event> events;
+  const char *env = SDL_getenv("APP_FAKE_EVENTS");
+  if (!env) return events;
+  const std::time_t t = now();
+  for (std::string_view item : Calendar::detail::split(env, ';')) {
+    int h = 0, m = 0, used = 0;
+    const std::string s(item);
+    if (std::sscanf(s.c_str(), " %d:%d %n", &h, &m, &used) < 2) continue;
+    std::tm tm = localTime(t);
+    tm.tm_hour = h, tm.tm_min = m, tm.tm_sec = 0, tm.tm_isdst = -1;
+    std::time_t at = std::mktime(&tm);
+    if (at < t) {
+      tm.tm_mday += 1, tm.tm_isdst = -1;
+      at = std::mktime(&tm);
+    }
+    events.push_back({at, at + 3600, s.substr(used), false});
+  }
+  std::sort(events.begin(), events.end(), [](const auto &a, const auto &b) { return a.start < b.start; });
+  return events;
 }
 #endif
 
@@ -262,6 +301,56 @@ std::size_t utf8Len(unsigned char c) {
   if ((c >> 4) == 0xE) return 3;
   if ((c >> 3) == 0x1E) return 4;
   return 1;
+}
+
+// The first `max` characters of a UTF-8 string, with an ellipsis when it had more.
+std::string ellipsize(const std::string &s, std::size_t max) {
+  std::size_t i = 0, n = 0;
+  while (i < s.size() && n < max)
+    i += utf8Len((unsigned char)s[i]), ++n;
+  return i >= s.size() ? s : s.substr(0, i) + "\xE2\x80\xA6";
+}
+
+// Small line icons for the event horizon, drawn as distance fields (so they are smooth at any size) and baked into
+// white-on-transparent textures once at startup, like the weather icons.
+namespace Sdf {
+inline float segment(float px, float py, float ax, float ay, float bx, float by) {
+  const float dx = bx - ax, dy = by - ay;
+  const float h = std::clamp(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy), 0.0f, 1.0f);
+  return std::hypot(px - ax - dx * h, py - ay - dy * h);
+}
+inline float roundBox(float px, float py, float cx, float cy, float hw, float hh, float r) {
+  const float qx = std::abs(px - cx) - hw + r, qy = std::abs(py - cy) - hh + r;
+  return std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - r;
+}
+// Distance to an arc of radius `rad` around (cx, cy) from angle a0 to a1 (degrees, y down).
+inline float arc(float px, float py, float cx, float cy, float rad, float a0, float a1) {
+  float a = std::atan2(py - cy, px - cx) * 180.0f / (float)M_PI;
+  if (a < a0) a += 360.0f;
+  if (a <= a1) return std::abs(std::hypot(px - cx, py - cy) - rad);
+  auto end = [&](float deg) {
+    const float t = deg * (float)M_PI / 180.0f;
+    return std::hypot(px - cx - rad * std::cos(t), py - cy - rad * std::sin(t));
+  };
+  return std::min(end(a0), end(a1));
+}
+} // namespace Sdf
+
+// A white texture whose alpha is 1 where `dist` (in pixels of a size×size canvas) is below 0, with a pixel of
+// antialiasing.
+template <typename F> TexturePtr bakeIcon(SDL_Renderer *r, int size, F dist) {
+  SurfacePtr s(SDL_CreateSurface(size, size, SDL_PIXELFORMAT_RGBA32));
+  if (!s) return {};
+  for (int y = 0; y < size; ++y) {
+    auto *row = (Uint8 *)s->pixels + (std::size_t)y * s->pitch;
+    for (int x = 0; x < size; ++x) {
+      row[x * 4 + 0] = row[x * 4 + 1] = row[x * 4 + 2] = 255;
+      row[x * 4 + 3] = (Uint8)(std::clamp(0.5f - dist(x + 0.5f, y + 0.5f), 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+  }
+  TexturePtr t(SDL_CreateTextureFromSurface(r, s.get()));
+  if (t) SDL_SetTextureScaleMode(t.get(), SDL_SCALEMODE_LINEAR);
+  return t;
 }
 
 // A soft drop shadow for a run of text: its alpha, padded by `radius` and box-blurred (three passes each way
@@ -452,7 +541,7 @@ void verifyReadability(std::time_t day) {
       const TextTheme th = textThemeFor(l, s, light);
       light = th.lightInk;
       haloMax = std::max({haloMax, th.haloTime, th.haloTop});
-      scrimMax = std::max({scrimMax, th.scrimStrip, th.scrimRain});
+      scrimMax = std::max({scrimMax, th.scrimStrip, th.scrimHorizon});
       const Backdrops b = backdropsFor(l, s);
       std::string problems;
       auto need = [&](const char *what, Col ink, Col bg, float min) {
@@ -466,8 +555,8 @@ void verifyReadability(std::time_t day) {
         need("date", th.inkDim, mix(bg, th.halo, th.haloTop), Readability::text);
       for (const Col &bg : b.strip)
         need("strip", th.landInk, mix(bg, th.scrim, th.scrimStrip), Readability::landInk);
-      for (const Col &bg : b.rain)
-        need("rain", th.landMute, mix(bg, th.scrim, th.scrimRain), Readability::text);
+      for (const Col &bg : b.horizon)
+        need("horizon", th.landMute, mix(bg, th.scrim, th.scrimHorizon), Readability::text);
       if (!problems.empty() && failures++ < 20)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Low contrast, weather %d at %02d:%02d:%s", code, tm.tm_hour,
                     tm.tm_min, problems.c_str());
@@ -486,10 +575,12 @@ public:
   Clock(const Clock &) = delete;
   Clock &operator=(const Clock &) = delete;
 
-  // The weather thread writes to members of this object: stop and join it before anything else is destroyed.
+  // The worker threads write to members of this object: stop and join them before anything else is destroyed.
   ~Clock() {
-    weatherLoaderThread.request_stop();
-    if (weatherLoaderThread.joinable()) weatherLoaderThread.join();
+    for (std::jthread *t : {&weatherLoaderThread, &calendarLoaderThread})
+      t->request_stop();
+    for (std::jthread *t : {&weatherLoaderThread, &calendarLoaderThread})
+      if (t->joinable()) t->join();
   }
 
   bool Init() {
@@ -530,9 +621,10 @@ public:
     fCondition = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 13.0f);
     fAxis = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 12.0f);
     fAdvice = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 23.0f);
-    fRainCap = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 15.0f);
+    fMarkTitle = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 15.0f);
+    fMarkWhen = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 15.0f);
     if (!fTime || !fTempNum || !fWindNum || !fUnitLg || !fUnitSm || !fDate || !fCondition || !fAxis || !fAdvice ||
-        !fRainCap) {
+        !fMarkTitle || !fMarkWhen) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't load embedded fonts: %s", SDL_GetError());
       return false;
     }
@@ -541,9 +633,9 @@ public:
 
     // Prefer proper typographic glyphs where the font carries them.
     windUnit = TTF_FontHasGlyph(fUnitSm.get(), 0x2044) ? "m\xE2\x81\x84s" : "m/s"; // m⁄s
-    approx = TTF_FontHasGlyph(fRainCap.get(), 0x2248) ? "\xE2\x89\x88" : "~";      // ≈
 
     LoadIcons();
+    BakeHorizonIcons();
     if (!scene.Init(renderer.get())) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't create scene textures: %s", SDL_GetError());
       return false;
@@ -571,6 +663,9 @@ public:
     // SDL fills its CPU-feature cache lazily and without a lock; do it here, before the worker thread exists.
     SDL_GetSIMDAlignment();
     weatherLoaderThread = std::jthread(&Clock::FetchWeather, this);
+    const char *urls = SDL_getenv("CALENDAR_URL");
+    calendarUrls = urls && *urls ? urls : Config::CalendarUrl;
+    if (!calendarUrls.empty()) calendarLoaderThread = std::jthread(&Clock::FetchCalendar, this);
     return true;
   }
 
@@ -584,16 +679,22 @@ private:
   WindowPtr window;
   RendererPtr renderer;
 
-  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fCondition, fAxis, fAdvice, fRainCap;
+  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fCondition, fAxis, fAdvice, fMarkTitle, fMarkWhen;
   std::array<TexturePtr, (std::size_t)Icon::COUNT> icons;
+  TexturePtr icCalendar, icCall, icSun, icDot, icGlow;
   std::string windUnit = "m/s";
-  std::string approx = "~";
   const std::string deg = "\xC2\xB0";    // °
   const std::string mdot = " \xC2\xB7 "; // · with spaces
 
   std::mutex weatherMutex;
   WeatherState weather;
   WeatherInput lastInput; // kept across failed fetches, so a network blip does not clear the sky
+
+  std::string calendarUrls;
+  std::mutex calendarMutex;
+  std::vector<Calendar::Event> calendarEvents; // the next few days
+
+  float horizonShown = 0; // the timeline fades in and out as it becomes relevant
 
   Scene scene;
   SceneState sceneNow; // eased towards the forecast
@@ -617,11 +718,17 @@ private:
   TrackedLabel lDate{3}, lCondition{3};
   Label lHH{10}, lColon{10}, lMM{10};
   Label lTempNum{4}, lTempUnit{3}, lWindNum{4}, lWindUnit{3};
-  Label lAdvice{4}, lRainCap{3};
-  Label lAxisNow{2}, lAxisMid{2}, lAxisEnd{2};
+  Label lAdvice{4};
+  std::array<Label, 5> lAxis{Label{2}, Label{2}, Label{2}, Label{2}, Label{2}};
+  static constexpr int kMarkLabels = 8, kBandLabels = 3;
+  std::array<Label, kMarkLabels> lMarkTitle{Label{3}, Label{3}, Label{3}, Label{3},
+                                            Label{3}, Label{3}, Label{3}, Label{3}};
+  std::array<Label, kMarkLabels> lMarkWhen{Label{3}, Label{3}, Label{3}, Label{3},
+                                           Label{3}, Label{3}, Label{3}, Label{3}};
+  std::array<Label, kBandLabels> lBand{Label{3}, Label{3}, Label{3}};
 
-  // Declared last so it is destroyed first; ~Clock also joins it explicitly.
-  std::jthread weatherLoaderThread;
+  // Declared last so they are destroyed first; ~Clock also joins them explicitly.
+  std::jthread weatherLoaderThread, calendarLoaderThread;
 
   // -------------------------------------------------------------- assets --
   void LoadIcons() {
@@ -660,6 +767,52 @@ private:
     SDL_RenderTexture(renderer.get(), t, nullptr, &dst);
   }
 
+  // The event horizon's icons, on a 40×40 canvas: a calendar page, a telephone handset, the sun on the horizon, and
+  // a marker dot with its glow.
+  void BakeHorizonIcons() {
+    SDL_Renderer *r = renderer.get();
+    constexpr int n = 40;
+    constexpr float stroke = 1.7f;
+    icCalendar = bakeIcon(r, n, [](float x, float y) {
+      const float page = std::abs(Sdf::roundBox(x, y, 20, 23, 14, 13, 4)) - stroke;
+      const float band = std::max(Sdf::roundBox(x, y, 20, 23, 14, 13, 4), y - 16.0f);
+      const float rings = std::min(Sdf::segment(x, y, 13, 6, 13, 12), Sdf::segment(x, y, 27, 6, 27, 12)) - stroke;
+      return std::min({page, band, rings});
+    });
+    icCall = bakeIcon(r, n, [](float x, float y) {
+      constexpr float cx = 27, cy = 13, rad = 15;
+      const float body = Sdf::arc(x, y, cx, cy, rad, 88, 182) - 2.6f;
+      auto pad = [&](float deg) {
+        const float t = deg * (float)M_PI / 180.0f, ex = cx + rad * std::cos(t), ey = cy + rad * std::sin(t);
+        return Sdf::segment(x, y, ex, ey, ex + (cx - ex) * 0.38f, ey + (cy - ey) * 0.38f) - 3.6f;
+      };
+      return std::min({body, pad(90), pad(180)});
+    });
+    icSun = bakeIcon(r, n, [](float x, float y) {
+      const float line = Sdf::segment(x, y, 4, 29, 36, 29) - stroke;
+      const float disc = std::max(std::hypot(x - 20, y - 29) - 8.0f, y - 26.5f);
+      float rays = 99.0f;
+      for (float deg : {180.0f, 225.0f, 270.0f, 315.0f, 360.0f}) {
+        const float c = std::cos(deg * (float)M_PI / 180.0f), sn = std::sin(deg * (float)M_PI / 180.0f);
+        rays = std::min(rays, Sdf::segment(x, y, 20 + 12 * c, 29 + 12 * sn, 20 + 16 * c, 29 + 16 * sn) - stroke);
+      }
+      return std::min({line, disc, rays});
+    });
+    icDot = bakeIcon(r, n, [](float x, float y) { return (std::hypot(x - 20, y - 20) - 19.0f) * 0.5f; });
+    icGlow = bakeIcon(r, n, [](float x, float y) {
+      return 0.5f - std::pow(smooth01(1.0f - std::hypot(x - 20, y - 20) / 20.0f), 1.5f); // alpha falls off
+    });
+  }
+
+  void drawTex(SDL_Texture *t, float cx, float cy, float size, Col c, float alpha) {
+    if (!t) return;
+    SDL_SetTextureColorMod(t, (Uint8)std::clamp(c.r, 0.0f, 255.0f), (Uint8)std::clamp(c.g, 0.0f, 255.0f),
+                           (Uint8)std::clamp(c.b, 0.0f, 255.0f));
+    SDL_SetTextureAlphaMod(t, (Uint8)std::clamp(c.a * alpha, 0.0f, 255.0f));
+    SDL_FRect dst{cx - size / 2.0f, cy - size / 2.0f, size, size};
+    SDL_RenderTexture(renderer.get(), t, nullptr, &dst);
+  }
+
   void fillRect(float x, float y, float w, float h, Col c) {
     SDL_SetRenderDrawColor(renderer.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b, (Uint8)c.a);
     SDL_FRect r{x, y, w, h};
@@ -679,16 +832,16 @@ private:
     const auto params = cpr::Parameters{{"latitude", std::format("{:.4f}", Config::latitude)},
                                         {"longitude", std::format("{:.4f}", Config::longitude)},
                                         {"current_weather", "true"},
-                                        {"minutely_15", "precipitation"},
+                                        {"minutely_15", "precipitation,snowfall"},
                                         {"windspeed_unit", "ms"},
-                                        {"forecast_days", "1"},
+                                        {"forecast_days", "2"},
                                         {"timezone", "auto"}};
 
     while (!stopToken.stop_requested()) {
       bool ok = false;
       double temp = 0, wind = 0, windDir = 270;
       int code = 0;
-      std::vector<float> rain;
+      Horizon::Precip precip;
       try {
         cpr::Response resp = cpr::Get(url, params, kConnectTimeout, kTimeout, abortOnStop(stopToken));
         if (resp.status_code == 200) {
@@ -700,16 +853,24 @@ private:
           if (cw.contains("winddirection") && cw.at("winddirection").is_number())
             windDir = cw.at("winddirection").get<double>();
 
+          // Each value is the sum over the 15 minutes before its time; keep the steps from now to the horizon.
           if (j.contains("minutely_15")) {
             const auto &m = j.at("minutely_15");
             const auto &times = m.at("time");
-            const auto &precip = m.at("precipitation");
+            const auto &mm = m.at("precipitation");
+            const bool haveSnow = m.contains("snowfall");
             std::time_t now = std::time(nullptr);
             std::size_t start = 0;
-            while (start < times.size() && parseTs(times[start].get<std::string>()) < now - 450)
+            while (start < times.size() && parseTs(times[start].get<std::string>()) <= now)
               start++;
-            for (std::size_t i = start; i < start + 8 && i < precip.size(); ++i) {
-              rain.push_back(precip[i].is_null() ? 0.0f : (float)precip[i].get<double>());
+            constexpr std::size_t steps = Horizon::span / Horizon::step + 1;
+            if (start < times.size()) precip.from = parseTs(times[start].get<std::string>()) - Horizon::step;
+            for (std::size_t i = start; i < start + steps && i < mm.size(); ++i) {
+              const float fall = mm[i].is_null() ? 0.0f : (float)mm[i].get<double>();
+              const float snow =
+                  haveSnow && !m.at("snowfall")[i].is_null() ? (float)m.at("snowfall")[i].get<double>() : 0.0f;
+              precip.mm.push_back(fall);
+              precip.snow.push_back(snow * 10.0f / 7.0f > fall * 0.5f); // 7 cm of snow is ~10 mm of water
             }
           }
           ok = true;
@@ -729,7 +890,7 @@ private:
           weather.windspeed = wind;
           weather.winddirection = windDir;
           weather.weathercode = code;
-          weather.rain = std::move(rain);
+          weather.precip = std::move(precip);
           weather.advice = std::move(advice);
         } else {
           weather = WeatherState{};
@@ -738,6 +899,49 @@ private:
 
       // Every 5 minutes; sooner after a failure (e.g. Wi-Fi not up yet right after boot).
       sleepFor(stopToken, ok ? std::chrono::minutes(5) : std::chrono::minutes(1));
+    }
+  }
+
+  // The calendar feeds, every ten minutes. A feed that fails keeps its last good events, so a network blip does not
+  // empty the horizon. The feed addresses are secret: they are never logged.
+  void FetchCalendar(std::stop_token stopToken) {
+    SdlThreadCleanup cleanup;
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
+    std::vector<std::string> urls;
+    for (std::string_view u : Calendar::detail::split(calendarUrls, ' ')) {
+      if (u.empty()) continue;
+      std::string url(u);
+      if (url.starts_with("webcal://")) url = "https://" + url.substr(9);
+      urls.push_back(std::move(url));
+    }
+    std::vector<std::vector<Calendar::Event>> feeds(urls.size());
+
+    while (!stopToken.stop_requested()) {
+      bool ok = true;
+      const std::time_t t = std::time(nullptr);
+      for (std::size_t i = 0; i < urls.size(); ++i) {
+        try {
+          cpr::Response resp = cpr::Get(cpr::Url{urls[i]}, kConnectTimeout, kTimeout, abortOnStop(stopToken));
+          if (resp.status_code == 200) {
+            feeds[i] = Calendar::parse(resp.text, t - 86400, t + 3 * 86400);
+          } else {
+            ok = false;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Calendar %zu fetch failed: %ld", i + 1, resp.status_code);
+          }
+        } catch (const std::exception &e) {
+          ok = false;
+          SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Calendar %zu fetch failed: %s", i + 1, e.what());
+        }
+      }
+      std::vector<Calendar::Event> all;
+      for (const auto &f : feeds)
+        all.insert(all.end(), f.begin(), f.end());
+      std::sort(all.begin(), all.end(), [](const auto &a, const auto &b) { return a.start < b.start; });
+      {
+        std::scoped_lock lock(calendarMutex);
+        calendarEvents = std::move(all);
+      }
+      sleepFor(stopToken, ok ? std::chrono::minutes(10) : std::chrono::minutes(1));
     }
   }
 
@@ -806,7 +1010,7 @@ private:
 #endif
     if (w.valid) {
       lastInput = {true, w.weathercode, (float)w.windspeed, (float)w.winddirection,
-                   w.rain.empty() ? 0.0f : w.rain.front()};
+                   w.precip.mm.empty() ? 0.0f : w.precip.mm.front()};
     }
 
     // The world right now: the sky over this place at this moment, and the forecast rolling in over a few seconds.
@@ -814,12 +1018,13 @@ private:
     SceneState target;
     applySky(target, sky, (float)tm.tm_hour + tm.tm_min / 60.0f + tm.tm_sec / 3600.0f);
     applyWeather(target, lastInput);
+    const float dt = haveScene ? (float)std::clamp(secs - lastFrameSecs, 0.0, 0.5) : 0.0f;
     if (!haveScene) {
       sceneNow = target;
       sceneNow.snowCover = target.snowCover * target.snowIntensity;
       haveScene = true;
     } else {
-      easeScene(sceneNow, target, (float)std::clamp(secs - lastFrameSecs, 0.0, 0.5));
+      easeScene(sceneNow, target, dt);
     }
     lastFrameSecs = secs;
     deriveScene(sceneNow);
@@ -829,8 +1034,8 @@ private:
     scene.Draw(renderer.get(), sceneNow, look, secs);
     DrawTop(tm, w, th);
     DrawTime(tm, th);
-    DrawWeatherStrip(w, sky.sun.elevation > -0.83, look, th);
-    DrawRain(w, th);
+    DrawWeatherStrip(w, sky.sun.elevation > Horizon::sunriseElevation, look, th);
+    DrawHorizon(t, w, th, dt);
 
     if (shotPath && frameCount + 1 >= shotFrame) {
       if (SDL_Surface *s = SDL_RenderReadPixels(renderer.get(), nullptr)) {
@@ -972,63 +1177,147 @@ private:
     lAdvice.drawTop(r, (Config::screen_width - lAdvice.w) / 2.0f, adviceTop, th.landInk);
   }
 
-  // The next two hours of rain as eight 15-minute segments, with a caption above and a time axis below.
-  void DrawRain(const WeatherState &w, const TextTheme &th) {
+  // The event horizon (horizon.h): the next four hours on one time scale, with rain and snow as bands on the line,
+  // and the sun and the calendar as marks with a label above. Labels that would collide give way, soonest events
+  // first; their marks stay. Marks grow and brighten as their time comes closer.
+  void DrawHorizon(std::time_t t, const WeatherState &w, const TextTheme &th, float dt) {
+    std::vector<Calendar::Event> events;
+    {
+      std::scoped_lock lock(calendarMutex);
+      events = calendarEvents;
+    }
+#ifdef APP_DEBUG
+    if (SDL_getenv("APP_FAKE_EVENTS")) events = fakeEvents();
+#endif
+    const Horizon::Model m =
+        Horizon::modelFor(t, w.valid ? w.precip : Horizon::Precip{}, events, Config::latitude, Config::longitude);
+    const float target = m.relevant ? 1.0f : 0.0f;
+    horizonShown =
+        dt <= 0.0f ? target : horizonShown + std::clamp(target - horizonShown, -dt / 1.5f, dt / 1.5f); // 1.5 s
+    const float A = smooth01(horizonShown);
+    if (A <= 0.004f) return;
+
     SDL_Renderer *r = renderer.get();
     const float left = Layout::padX, right = Config::screen_width - Layout::padX, CW = right - left;
-    const Backing bk = backingFor(th.scrimRain, 0.5f);
-    drawSoftRect(r, left, Layout::rainCapBaseline - 16.0f, right, Layout::rainAxisBaseline + 4.0f, 36.0f, th.scrim,
-                 bk.panel);
+    const float lineY = Layout::horizonLineY;
+    auto xAt = [&](std::time_t at) {
+      return left + std::clamp((float)(at - t) / (float)Horizon::span, 0.0f, 1.0f) * CW;
+    };
+    auto withAlpha = [](Col c, float a) { return Col{c.r, c.g, c.b, c.a * a}; };
 
-    float peak = 0;
-    int peakIdx = 0;
-    for (std::size_t i = 0; i < w.rain.size(); ++i) {
-      if (w.rain[i] > peak) {
-        peak = w.rain[i];
-        peakIdx = (int)i;
-      }
-    }
-    const bool hasRain = peak > 0.05f;
-    std::string cap;
-    if (!w.valid) {
-      cap = "Checking the sky\xE2\x80\xA6";
-    } else if (!hasRain) {
-      cap = "No rain expected" + mdot + "next 2h";
-    } else {
-      const char *word = peak < 0.3f ? "Light" : (peak < 1.0f ? "Moderate" : "Heavy");
-      cap = peakIdx == 0 ? std::format("{} rain{}peak now", word, mdot)
-                         : std::format("{} rain{}peak in {}{} min", word, mdot, approx, peakIdx * 15);
-    }
-    lRainCap.set(r, fRainCap.get(), cap);
-    lRainCap.shadowAlpha = bk.glyph;
-    lRainCap.drawBase(r, left + (CW - lRainCap.w) / 2.0f, Layout::rainCapBaseline,
-                      hasRain ? th.landAccent : th.landDim);
+    const Backing bk = backingFor(th.scrimHorizon, 0.5f);
+    drawSoftRect(r, left, Layout::horizonTitleBaseline - 16.0f, right, Layout::horizonAxisBaseline + 4.0f, 36.0f,
+                 th.scrim, bk.panel * A);
 
-    constexpr int segments = 8;
-    constexpr float gap = 8.0f, base = 4.0f;
-    const float sw = (CW - gap * (segments - 1)) / segments;
-    const float bottom = Layout::rainBarY + base;
-    for (int i = 0; i < segments; ++i) {
-      const float mm = i < (int)w.rain.size() ? w.rain[i] : 0.0f;
-      const float sx = left + i * (sw + gap);
-      if (mm > 0.05f) {
-        const float hh = base + std::clamp(mm / 2.0f, 0.0f, 1.0f) * 14.0f;
-        fillRect(sx, bottom - hh, sw, hh, th.landAccent);
-      } else {
-        Col c = th.landInk;
-        c.a = 70;
-        fillRect(sx, bottom - base, sw, base, c);
-      }
+    // The time scale: a hairline with an hour tick, and NOW .. +4H below it.
+    fillRect(left, lineY - 0.75f, CW, 1.5f, withAlpha(th.landInk, 0.4f * A));
+    for (int h = 0; h <= 4; ++h) {
+      Label &l = lAxis[h];
+      l.set(r, fAxis.get(), h == 0 ? "NOW" : std::format("+{}H", h));
+      l.shadowAlpha = bk.glyph;
+      const float x = left + CW * h / 4.0f;
+      fillRect(x - 0.75f, lineY - 3.5f, 1.5f, 7.0f, withAlpha(th.landInk, 0.5f * A));
+      const float lx = h == 0 ? x : h == 4 ? x - l.w : x - l.w / 2.0f;
+      l.drawBase(r, lx, Layout::horizonAxisBaseline, th.landMute, A);
     }
 
-    lAxisNow.set(r, fAxis.get(), "NOW");
-    lAxisMid.set(r, fAxis.get(), "+1H");
-    lAxisEnd.set(r, fAxis.get(), "+2H");
-    for (Label *l : {&lAxisNow, &lAxisMid, &lAxisEnd})
-      l->shadowAlpha = bk.glyph;
-    lAxisNow.drawBase(r, left, Layout::rainAxisBaseline, th.landMute);
-    lAxisMid.drawBase(r, left + (CW - lAxisMid.w) / 2.0f, Layout::rainAxisBaseline, th.landMute);
-    lAxisEnd.drawBase(r, right - lAxisEnd.w, Layout::rainAxisBaseline, th.landMute);
+    // Rain and snow: a band on the line, as thick as the precipitation in each 15 minutes.
+    const Col snowCol{214, 230, 255}, rainCol = mix(th.landAccent, Col{96, 160, 255}, 0.5f);
+    for (std::size_t i = 0; i < w.precip.mm.size() && w.valid; ++i) {
+      const std::time_t a = w.precip.from + (std::time_t)i * Horizon::step, b = a + Horizon::step;
+      const float mm = w.precip.mm[i];
+      if (mm < 0.05f || b <= t || a >= t + Horizon::span) continue;
+      const float x0 = xAt(a), x1 = xAt(b), hh = 3.0f + std::clamp(mm / 2.0f, 0.0f, 1.0f) * 6.0f;
+      const bool snow = i < w.precip.snow.size() && w.precip.snow[i];
+      fillRect(x0, lineY - 1.0f - hh, x1 - x0, hh, withAlpha(snow ? snowCol : rainCol, 0.9f * A));
+    }
+
+    // Labels, in order of importance; one that would overlap a label already placed is left out.
+    struct Box {
+      float x0, x1, y0, y1;
+    };
+    std::vector<Box> placed;
+    auto place = [&](float x0, float w, float y0, float y1) -> std::optional<float> {
+      x0 = std::clamp(x0, left, right - w);
+      for (const Box &b : placed)
+        if (x0 < b.x1 + 16.0f && b.x0 < x0 + w + 16.0f && y0 < b.y1 && b.y0 < y1) return std::nullopt;
+      placed.push_back({x0, x0 + w, y0, y1});
+      return x0;
+    };
+    constexpr float icon = 20.0f, gap = 6.0f;
+    const float whenB = Layout::horizonWhenBaseline;
+
+    // Events first, then the rain and snow, then the sun.
+    int slot = 0;
+    for (const Horizon::Mark &mk : m.marks) {
+      if (slot >= kMarkLabels) break;
+      const bool sun = mk.kind == Horizon::Mark::Kind::Sunrise || mk.kind == Horizon::Mark::Kind::Sunset;
+      if (sun) continue;
+      DrawMark(mk, slot++, t, xAt(mk.beyond ? t + Horizon::span : mk.at), th, bk, A, place);
+    }
+    for (std::size_t i = 0; i < m.bands.size() && (int)i < kBandLabels; ++i) {
+      const Horizon::Band &b = m.bands[i];
+      Label &l = lBand[i];
+      l.set(r, fMarkWhen.get(), b.caption);
+      l.shadowAlpha = bk.glyph;
+      // At the start of the band, or failing that at its end, or just after a label in the way.
+      const float bw = icon + gap + l.w;
+      std::vector<float> tries{xAt(b.from), xAt(b.to) - bw};
+      for (const Box &p : placed)
+        tries.push_back(p.x1 + 16.0f);
+      std::optional<float> x0;
+      for (float x : tries)
+        if (x <= xAt(b.to) && (x0 = place(x, bw, whenB - 14.0f, whenB + 4.0f))) break;
+      if (!x0) continue;
+      drawIcon(b.snow ? Icon::Snow : Icon::Rain, *x0, whenB - 15.0f, icon, b.snow ? snowCol : th.landAccent, A);
+      l.drawBase(r, *x0 + icon + gap, whenB, th.landInk, A);
+    }
+    for (const Horizon::Mark &mk : m.marks) {
+      if (slot >= kMarkLabels) break;
+      const bool sun = mk.kind == Horizon::Mark::Kind::Sunrise || mk.kind == Horizon::Mark::Kind::Sunset;
+      if (sun) DrawMark(mk, slot++, t, xAt(mk.at), th, bk, A, place);
+    }
+  }
+
+  template <typename Place>
+  void DrawMark(const Horizon::Mark &mk, int slot, std::time_t t, float x, const TextTheme &th, const Backing &bk,
+                float A, Place &place) {
+    using Kind = Horizon::Mark::Kind;
+    SDL_Renderer *r = renderer.get();
+    const Col colour = mk.kind == Kind::Call    ? Col{255, 128, 200}
+                       : mk.kind == Kind::Event ? Col{184, 150, 255}
+                                                : Col{255, 180, 86};
+    // How close it is: 0 at the far end of the window (or beyond it), 1 now; and within the last half hour.
+    const float near = mk.beyond ? 0.0f : 1.0f - std::clamp((float)(mk.at - t) / (float)Horizon::span, 0.0f, 1.0f);
+    const float soon = mk.beyond ? 0.0f : smooth01(1.0f - (float)(mk.at - t) / 1800.0f);
+    const bool event = mk.kind == Kind::Event || mk.kind == Kind::Call;
+    const float radius = event ? 3.5f + 2.5f * near * near : 3.5f;
+    const float lineY = Layout::horizonLineY;
+
+    // The label: an icon, the title, and the time below it.
+    Label &title = lMarkTitle[slot], &when = lMarkWhen[slot];
+    title.set(r, fMarkTitle.get(), ellipsize(mk.title, 22));
+    when.set(r, fMarkWhen.get(), mk.when);
+    title.shadowAlpha = when.shadowAlpha = bk.glyph;
+    constexpr float icon = 20.0f, gap = 6.0f;
+    const float titleB = Layout::horizonTitleBaseline, whenB = Layout::horizonWhenBaseline;
+    const float w = icon + gap + std::max(title.w, when.w);
+    if (const auto x0 = place(x - icon / 2.0f, w, titleB - 13.0f, whenB + 4.0f)) {
+      SDL_Texture *ic = mk.kind == Kind::Call ? icCall.get() : event ? icCalendar.get() : icSun.get();
+      const float iconY = (titleB + whenB) / 2.0f - 5.0f;
+      drawTex(ic, *x0 + icon / 2.0f, iconY, icon, mix(colour, th.landInk, 0.3f), A);
+      const float emphasis = event ? 0.5f + 0.5f * near : 0.5f;
+      title.drawBase(r, *x0 + icon + gap, titleB, mix(th.landDim, th.landInk, emphasis), A);
+      when.drawBase(r, *x0 + icon + gap, whenB, mix(th.landMute, th.landDim, emphasis), A);
+      // A hairline from the label down to its mark, when the label sits right above it.
+      if (std::abs(*x0 + icon / 2.0f - x) < 1.0f)
+        fillRect(x - 0.5f, whenB + 6.0f, 1.0f, lineY - radius - 2.0f - (whenB + 6.0f),
+                 Col{th.landInk.r, th.landInk.g, th.landInk.b, 70.0f * A});
+    }
+
+    // The mark, with a soft glow in the last half hour before an event.
+    if (event && soon > 0.0f) drawTex(icGlow.get(), x, lineY, radius * 5.0f, colour, 0.45f * soon * A);
+    drawTex(icDot.get(), x, lineY, radius * 2.0f + 1.0f, colour, (mk.beyond ? 0.7f : 0.75f + 0.25f * near) * A);
   }
 };
 
