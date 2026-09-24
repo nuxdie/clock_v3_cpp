@@ -121,36 +121,65 @@ and Auth Bearer <auth_token> header. It would return a JSON object with the foll
 To get your editor pick up on dependencies headers, compile your project once in debug mode.
 Then run `ln -s build/debug/compile_commands.json` in the root of your project and restart clangd.
 
-# Animated background
+# Living background
 
-`scene.h` draws an animated landscape behind the text: a sky gradient with a soft glow, the sun on an arc from
-sunrise to sunset, the moon and twinkling stars (and the odd shooting star) at night, drifting clouds, far
-mountains, mid hills with twinkling town lights, near hills, and leaves swaying in the bottom corners. The hill
-layers sway sideways very slowly, each by an amount proportional to its nearness (parallax). A fixed "painted
-canvas" of brush strokes lies over everything but the text.
+One landscape, drawn in depth layers, whose look is computed each frame from a handful of numbers rather than picked
+from a set of backgrounds:
 
-Its colours come from one of eighteen palettes ("worlds"): six times of day (night, blue hour, dawn, day, golden
-hour, dusk, keyed to the real sunrise and sunset from the forecast, 07:00 and 19:00 until the first fetch
-succeeds) for each of three kinds of weather (clear, grey, storm), picked from the WMO weather code. Within a kind
-the palettes blend smoothly through the day. The particles — cloud cover, rain, snow, fog and lightning — ease in
-and out over a few seconds when the forecast changes, and a change of kind fades the palette over 12 s.
+```text
+time + place ──► sun and moon (astro.h) ─┐
+                                         ├─► SceneState ──► Look ──► Scene (scene.h) draws the layers
+forecast ─────► clouds, rain, fog, wind ─┘   (scene_state.h)  └────► TextTheme: readable ink over it
+```
 
-Readability: the date and time sit on the sky, and the weather strip and rain chart on the near hills, which are
-dark in every world, so that text is always light. Each palette is designed for contrast on its own (ink ≥ 7:1, dim
-ink and small labels ≥ 4.5:1, accents ≥ 3:1, against the sky, the glow, the clouds and, for the feet of the
-digits, the mountains), and colours only blend between palettes of the same polarity. A flip between a light and a
-dark sky (sunrise, sunset, a storm rolling in) is a 2.5 s fade. Debug builds walk every minute of the day for every
-kind of weather at startup and log any moment below those targets.
+- `astro.h` places the sun and the moon (elevation, azimuth, phase) for `Config::latitude`/`longitude` with the
+  low-precision Astronomical Almanac formulas. Sunrise, sunset and twilight follow from the sun's elevation for any
+  date, with no network needed.
+- `SceneState` holds the time fields (sun and moon position, morning or evening) and the weather fields (cloudiness,
+  rain, snow, storm, visibility, wind speed and direction, and slower wetness and snow cover). `applySky` and
+  `applyWeather` (from the WMO code and the 15-minute rain forecast) set a target; `easeScene` eases the weather
+  fields towards it, so a new forecast rolls in over a few seconds, the ground dries over a quarter of an hour and
+  snow settles over ten minutes.
+- `lookFor` turns the state into colours. The sky, land and cloud colours are keyframed by the sun's elevation
+  (night −18°, dawn/dusk −10° and −4°, sunrise/sunset 0°, 6°, 15°, day 30°), with a morning set (pink, peach, cool
+  blue) and an evening set (gold, coral, violet) blended by which side of the meridian the sun is on. Nothing
+  snaps: every colour is a continuous function of the time. Weather then grades those colours: cloud greys and dims
+  them, a storm bruises them violet, haze washes out the distance first (far mountains, then the middle range, the
+  hills, the shore), snow whitens the land in proportion to the light, and wet ground darkens.
+- `Scene::Draw` renders, back to front: sky gradient, horizon glow at the sun's azimuth, stars and shooting stars,
+  sun, moon (baked for its phase), birds on fair days, the cloud deck and drifting clouds, lightning, distant
+  mountains, low cloud in heavy rain, mist, a middle range, forested hills, the far shore with its forest and town
+  (lit windows at night that switch on and off), the lake (mirrored sky and mountains, the sun's or moon's glitter
+  path, shimmer, rings where rain lands), the near shore and reeds, foreground pines, rain and snow, and a
+  painted-canvas texture. The layers sway sideways with a slow camera breath scaled by their nearness (0.05× clouds,
+  0.10× far mountains, 0.20× hills, 0.30× far shore, 0.45× near shore, 1× foreground pines). Wind sets the cloud
+  drift (direction and speed), the rain's slant, how much the lake blurs its reflections, and how hard the pines and
+  reeds sway — barely at a breeze, clearly in a gale.
 
-Everything is drawn on the GPU as about twenty batched `SDL_RenderGeometry` calls over a few small sprites baked at
-startup (soft dot, glow, sun disc, crescent, three clouds, the canvas). The app iterates at 30 Hz.
+Readability: the date, the time and the condition sit on the sky; the weather row, the advice and the rain timeline
+on the land, which is kept dark at every hour. `textThemeFor` samples what lies behind each piece of text (sky at
+several heights, the horizon glow, clouds at full strength, the mountains behind the feet of the digits, the hills,
+the ground, mist) and picks light or dark ink for the sky text (with hysteresis; a flip fades over 2 s). Where the
+scene alone falls short of the targets (5:1 for the digits, 4.5:1 for small text, 6:1 for the land text, 2.5:1 for
+the big decorative colon), it works out the least backing that reaches them: a soft shadow (or, behind dark ink, a glow) around the
+glyphs, plus a soft panel for anything the shadow cannot supply. So the text is readable by construction in any
+weather; debug builds walk every two minutes of the day in every kind of weather at startup, check it, and log
+how much backing the palettes needed. The accent (colon, rain bars) takes its hue from the scene — peach at sunrise,
+blue by day, coral at sunset, violet at night, cool blue in rain, electric purple in a storm — and is lightened or
+deepened within that hue until it reads.
+
+Everything is drawn on the GPU as a few dozen batched `SDL_RenderGeometry` calls over a few small sprites baked at
+startup (soft dot, glow, sun disc, moon, three clouds, the canvas). The app iterates at 30 Hz.
 
 Debug-build helpers:
 
 ```sh
 APP_FAKE_TIME=18:30 ./build/debug/digital_clock_v3                  # pretend it is 18:30 today
-APP_FAKE_WEATHER=95 ./build/debug/digital_clock_v3                  # pretend a WMO weather code (0 clear, 3 overcast,
-                                                                    # 45 fog, 63 rain, 75 snow, 95 thunderstorm)
+APP_FAKE_TIME="2026-12-21 16:10" ./build/debug/digital_clock_v3     # ...or any moment (season, moon phase)
+APP_FAKE_WEATHER=95 ./build/debug/digital_clock_v3                  # pretend a WMO weather code (0 clear, 2 partly
+                                                                    # cloudy, 3 overcast, 45 fog, 63 rain, 65 heavy
+                                                                    # rain, 75 snow, 95 thunderstorm)
+APP_FAKE_WIND=16,270 ./build/debug/digital_clock_v3                 # with APP_FAKE_WEATHER: wind m/s[,from degrees]
 APP_SHOT=shot.png APP_SHOT_FRAME=40 ./build/debug/digital_clock_v3  # save a frame and exit
 ```
 

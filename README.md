@@ -1,8 +1,10 @@
-![clock_v3_cpp in eight worlds: dawn, dawn rain, day, overcast, golden hour, sunset storm, night, night rain](screenshot.png)
+![clock_v3_cpp through a day and its weather: dawn, sunrise, morning, noon, golden hour, twilight, rain, fog, snow and a night storm](screenshot.png)
 
-The background is an animated landscape that follows the real sunrise and sunset (night, blue hour, dawn, day,
-golden hour, dusk) and the weather (clear, grey, storm), with drifting clouds, rain, snow, fog, lightning, stars and
-swaying leaves. See [DEVNOTES.md](DEVNOTES.md#animated-background) for how it works.
+The background is one living landscape — mountains over a lake, a forest and a small town on the far shore, pines in
+front — that follows the real sun and moon for where the clock hangs, and the weather: clouds, rain, fog, snow,
+storms and wind change the same place rather than swapping in another picture. Clouds drift with the wind, rain
+slants in it, the pines sway, stars twinkle, the town lights up at night, and the layers breathe with a slow
+parallax. See [DEVNOTES.md](DEVNOTES.md#living-background) for how it works.
 
 # Prerequisites
 
