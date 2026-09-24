@@ -37,7 +37,11 @@ namespace Config {
 constexpr int screen_width = Screen::width;
 constexpr int screen_height = Screen::height;
 constexpr const char *AppName = "Digital Clock v3";
-constexpr const char *AppVersion = "0.3.0";
+constexpr const char *AppVersion = "0.4.0";
+
+// Where the clock hangs: the forecast is for here, and the sun and moon are placed for here.
+constexpr double latitude = 52.3738;
+constexpr double longitude = 4.8910;
 
 // GROQ_API_KEY is defined via CMake target_compile_definitions
 #ifndef GROQ_API_KEY
@@ -45,17 +49,6 @@ constexpr const char *GroqApiKey = "";
 #else
 constexpr const char *GroqApiKey = GROQ_API_KEY;
 #endif
-
-// Layout (logical pixels)
-constexpr float pad_x = 56.0f;
-constexpr float date_baseline = 84.0f;
-constexpr float time_baseline = 362.0f;
-constexpr float time_size = 300.0f;
-constexpr float strip_baseline = 470.0f; // baseline of the weather numbers
-constexpr float rain_cap_baseline = 512.0f;
-constexpr float rain_chart_top = 524.0f;
-constexpr float rain_chart_h = 30.0f;
-constexpr float rain_axis_baseline = 570.0f;
 } // namespace Config
 
 // ------------------------------------------------------------- weather ----
@@ -165,14 +158,20 @@ std::tm localTime(std::time_t t) {
 }
 
 #ifdef APP_DEBUG
-// Debug: APP_FAKE_TIME=HH:MM pins the clock to that time today, to check the sky at any hour.
+// Debug: APP_FAKE_TIME=HH:MM pins the clock to that time today, and APP_FAKE_TIME="YYYY-MM-DD HH:MM" to that
+// moment on another day (the sun's path and the moon's phase follow the date), to check the sky at any hour.
 std::time_t fakeTimeOffset() {
   static const std::time_t offset = [] {
-    int h = 0, m = 0;
+    int Y = 0, M = 0, D = 0, h = 0, m = 0;
     const char *env = SDL_getenv("APP_FAKE_TIME");
-    if (!env || std::sscanf(env, "%d:%d", &h, &m) != 2) return std::time_t{0};
+    if (!env) return std::time_t{0};
     const std::time_t now = std::time(nullptr);
     std::tm tm = localTime(now);
+    if (std::sscanf(env, "%d-%d-%d %d:%d", &Y, &M, &D, &h, &m) == 5) {
+      tm.tm_year = Y - 1900, tm.tm_mon = M - 1, tm.tm_mday = D;
+    } else if (std::sscanf(env, "%d:%d", &h, &m) != 2) {
+      return std::time_t{0};
+    }
     tm.tm_hour = h, tm.tm_min = m, tm.tm_sec = 0, tm.tm_isdst = -1;
     return std::mktime(&tm) - now;
   }();
@@ -180,8 +179,8 @@ std::time_t fakeTimeOffset() {
 }
 std::time_t now() { return std::time(nullptr) + fakeTimeOffset(); }
 
-// Debug: APP_FAKE_WEATHER=<WMO code> shows that weather, e.g. 0 clear, 3 overcast, 45 fog, 63 rain, 75 snow,
-// 95 thunderstorm.
+// Debug: APP_FAKE_WEATHER=<WMO code> shows that weather, e.g. 0 clear, 2 partly cloudy, 3 overcast, 45 fog,
+// 63 rain, 65 heavy rain, 75 snow, 95 thunderstorm; APP_FAKE_WIND=<m/s>[,<degrees from>] the wind.
 int fakeWeatherCode() {
   static const int code = [] {
     const char *env = SDL_getenv("APP_FAKE_WEATHER");
@@ -194,16 +193,6 @@ std::time_t now() { return std::time(nullptr); }
 #endif
 
 std::tm localNow() { return localTime(now()); }
-
-// Fallback when the forecast has not delivered today's sun times yet: 07:00 and 19:00.
-SunTimes defaultSunTimes() {
-  std::tm tm = localNow();
-  tm.tm_min = 0, tm.tm_sec = 0, tm.tm_isdst = -1;
-  tm.tm_hour = 7;
-  const std::time_t sunrise = std::mktime(&tm);
-  tm.tm_hour = 19, tm.tm_isdst = -1;
-  return {sunrise, std::mktime(&tm)};
-}
 
 // Interruptible sleep: returns early when the owning std::jthread is asked to stop.
 void sleepFor(const std::stop_token &stopToken, std::chrono::milliseconds duration) {
@@ -238,10 +227,10 @@ struct WeatherState {
   bool valid = false;
   double temperature = 0;
   double windspeed = 0;
+  double winddirection = 270; // degrees the wind comes from
   int weathercode = 0;
   std::string advice;
-  std::vector<float> rain;   // precipitation mm per 15-min step, starting ~now
-  std::vector<SunTimes> sun; // one entry per forecast day
+  std::vector<float> rain; // precipitation mm per 15-min step, starting ~now
 };
 
 #ifdef APP_DEBUG
@@ -251,11 +240,16 @@ WeatherState fakeWeather(int code) {
   w.valid = true;
   w.temperature = 14;
   w.windspeed = 5;
+  if (const char *env = SDL_getenv("APP_FAKE_WIND")) {
+    float speed = 5, dir = 270;
+    if (std::sscanf(env, "%f,%f", &speed, &dir) >= 1) w.windspeed = speed, w.winddirection = dir;
+  }
   w.weathercode = code;
   w.advice = basicAdvice(w.temperature);
-  const WeatherLook look = weatherLook(code, 5, 0);
+  SceneState s;
+  applyWeather(s, {true, code, 5, 270, 0});
   for (float mm : {0.3f, 0.7f, 1.1f, 1.3f, 0.9f, 0.5f, 0.2f, 0.0f})
-    w.rain.push_back(mm * look.c.rain);
+    w.rain.push_back(mm * s.rainIntensity);
   return w;
 }
 #endif
@@ -270,10 +264,58 @@ std::size_t utf8Len(unsigned char c) {
   return 1;
 }
 
+// A soft drop shadow for a run of text: its alpha, padded by `radius` and box-blurred (three passes each way
+// approximate a gaussian). Made once per text change, so it costs nothing per frame.
+TexturePtr makeShadow(SDL_Renderer *r, SDL_Surface *text, int radius) {
+  SurfacePtr src(SDL_ConvertSurface(text, SDL_PIXELFORMAT_RGBA32));
+  if (!src) return {};
+  const int pad = radius * 2, w = src->w + 2 * pad, h = src->h + 2 * pad;
+  std::vector<float> a((std::size_t)w * h, 0.0f), tmp(a.size());
+  for (int y = 0; y < src->h; ++y) {
+    const auto *row = (const Uint8 *)src->pixels + (std::size_t)y * src->pitch;
+    for (int x = 0; x < src->w; ++x)
+      a[(std::size_t)(y + pad) * w + x + pad] = row[x * 4 + 3] / 255.0f;
+  }
+  auto pass = [&](std::vector<float> &from, std::vector<float> &to, bool horizontal) {
+    const int n = horizontal ? w : h, lines = horizontal ? h : w;
+    for (int l = 0; l < lines; ++l) {
+      auto at = [&](std::vector<float> &v, int i) -> float & {
+        return horizontal ? v[(std::size_t)l * w + i] : v[(std::size_t)i * w + l];
+      };
+      float sum = 0.0f;
+      for (int i = -radius; i < n + radius; ++i) {
+        if (i + radius < n) sum += at(from, i + radius);
+        if (i - radius - 1 >= 0) sum -= at(from, i - radius - 1);
+        if (i >= 0 && i < n) at(to, i) = sum / (2 * radius + 1);
+      }
+    }
+  };
+  for (int i = 0; i < 3; ++i) {
+    pass(a, tmp, true);
+    pass(tmp, a, false);
+  }
+  SurfacePtr out(SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA32));
+  if (!out) return {};
+  for (int y = 0; y < h; ++y) {
+    auto *row = (Uint8 *)out->pixels + (std::size_t)y * out->pitch;
+    for (int x = 0; x < w; ++x) {
+      row[x * 4 + 0] = row[x * 4 + 1] = row[x * 4 + 2] = 255;
+      row[x * 4 + 3] = (Uint8)std::clamp(a[(std::size_t)y * w + x] * 255.0f, 0.0f, 255.0f);
+    }
+  }
+  TexturePtr t(SDL_CreateTextureFromSurface(r, out.get()));
+  if (t) SDL_SetTextureScaleMode(t.get(), SDL_SCALEMODE_LINEAR);
+  return t;
+}
+
 // A cached single-run text texture, always rendered white and tinted at draw time
-// so theme colour changes and blinking are free (no re-rasterisation).
+// so theme colour changes and blinking are free (no re-rasterisation). With a `shadowRadius` it also keeps a soft
+// shadow to lay under the text over a busy background.
 struct Label {
-  TexturePtr tex;
+  explicit Label(int shadowRadius = 0) : shadowRadius(shadowRadius) {}
+
+  int shadowRadius;
+  TexturePtr tex, shadow;
   float w = 0, h = 0;
   int ascent = 0;
   std::string cache;
@@ -284,6 +326,7 @@ struct Label {
     cache = s;
     wrapCache = wrap;
     ascent = TTF_GetFontAscent(f);
+    shadow.reset();
     if (s.empty()) {
       tex.reset();
       w = h = 0;
@@ -296,11 +339,19 @@ struct Label {
       tex.reset(SDL_CreateTextureFromSurface(r, surf.get()));
       w = (float)surf->w;
       h = (float)surf->h;
+      if (shadowRadius > 0) shadow = makeShadow(r, surf.get(), shadowRadius);
     }
   }
 
   void drawTop(SDL_Renderer *r, float x, float y, Col c, float alpha = 1.0f) const {
     if (!tex) return;
+    if (shadow && alpha * c.a > 0.0f) {
+      const float pad = shadowRadius * 2.0f, drop = shadowRadius * 0.25f;
+      SDL_SetTextureColorMod(shadow.get(), (Uint8)shadowCol.r, (Uint8)shadowCol.g, (Uint8)shadowCol.b);
+      SDL_SetTextureAlphaMod(shadow.get(), (Uint8)std::clamp(shadowAlpha * alpha * 255.0f, 0.0f, 255.0f));
+      SDL_FRect dst{x - pad, y - pad + drop, w + 2 * pad, h + 2 * pad};
+      SDL_RenderTexture(r, shadow.get(), nullptr, &dst);
+    }
     SDL_SetTextureColorMod(tex.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b);
     SDL_SetTextureAlphaMod(tex.get(), (Uint8)std::clamp(c.a * alpha, 0.0f, 255.0f));
     SDL_FRect dst{x, y, w, h};
@@ -310,18 +361,27 @@ struct Label {
   void drawBase(SDL_Renderer *r, float x, float baselineY, Col c, float alpha = 1.0f) const {
     drawTop(r, x, baselineY - ascent, c, alpha);
   }
+
+  // Set before drawing: the shadow's colour (dark under light ink, light under dark ink) and strength.
+  Col shadowCol{0, 2, 12};
+  float shadowAlpha = 0.0f;
 };
 
-// Per-glyph rendered run so we can apply letter tracking (SDL_ttf has none).
+// Per-glyph rendered run so we can apply letter tracking (SDL_ttf has none), with an optional soft shadow per glyph.
 struct TrackedLabel {
+  explicit TrackedLabel(int shadowRadius = 0) : shadowRadius(shadowRadius) {}
+
+  int shadowRadius;
   std::string cache;
   float totalW = 0;
   int ascent = 0;
   struct G {
-    TexturePtr t;
+    TexturePtr t, shadow;
     float x = 0, w = 0, h = 0;
   };
   std::vector<G> gs;
+  Col shadowCol{0, 2, 12};
+  float shadowAlpha = 0.0f;
 
   void set(SDL_Renderer *r, TTF_Font *f, const std::string &s, float tracking) {
     if (s == cache && !gs.empty()) return;
@@ -340,6 +400,7 @@ struct TrackedLabel {
         g.t.reset(SDL_CreateTextureFromSurface(r, surf.get()));
         g.w = (float)surf->w;
         g.h = (float)surf->h;
+        if (shadowRadius > 0) g.shadow = makeShadow(r, surf.get(), shadowRadius);
       } else {
         int mw = 0, mh = 0;
         TTF_GetStringSize(f, ch.c_str(), 0, &mw, &mh); // spaces have no pixels
@@ -353,6 +414,14 @@ struct TrackedLabel {
   }
 
   void draw(SDL_Renderer *r, float ox, float baselineY, Col c) const {
+    const float pad = shadowRadius * 2.0f, drop = shadowRadius * 0.25f;
+    for (const auto &g : gs) {
+      if (!g.shadow || shadowAlpha <= 0.0f) continue;
+      SDL_SetTextureColorMod(g.shadow.get(), (Uint8)shadowCol.r, (Uint8)shadowCol.g, (Uint8)shadowCol.b);
+      SDL_SetTextureAlphaMod(g.shadow.get(), (Uint8)std::clamp(shadowAlpha * 255.0f, 0.0f, 255.0f));
+      SDL_FRect dst{ox + g.x - pad, baselineY - ascent - pad + drop, g.w + 2 * pad, g.h + 2 * pad};
+      SDL_RenderTexture(r, g.shadow.get(), nullptr, &dst);
+    }
     for (const auto &g : gs) {
       if (!g.t) continue;
       SDL_SetTextureColorMod(g.t.get(), (Uint8)c.r, (Uint8)c.g, (Uint8)c.b);
@@ -363,66 +432,49 @@ struct TrackedLabel {
   }
 };
 
-float relativeLuminance(Col c) {
-  auto lin = [](float v) {
-    v /= 255.0f;
-    return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
-  };
-  return 0.2126f * lin(c.r) + 0.7152f * lin(c.g) + 0.0722f * lin(c.b);
-}
-
-float contrast(Col a, Col b) {
-  float la = relativeLuminance(a), lb = relativeLuminance(b);
-  if (la < lb) std::swap(la, lb);
-  return (la + 0.05f) / (lb + 0.05f);
-}
-
 #ifdef APP_DEBUG
-// Everything a palette has to be readable against, for text at its place on screen. Clouds are checked at full
-// strength and the sky both with and without the glow, so the partial layers in between are covered.
-std::string contrastProblems(const Palette &p) {
-  std::string out;
-  auto need = [&](const char *what, Col ink, Col bg, float min) {
-    const float c = contrast(ink, bg);
-    if (c < min) out += std::format(" {} {:.1f}<{:.1f}", what, c, min);
-  };
-  auto withGlow = [&](Col c) { return mix(c, p.glow, p.glow.a / 255.0f); };
-  for (const Col &bg : {skyAt(p, 70), withGlow(skyAt(p, 70)), p.cloudLit, p.cloudShade}) { // date
-    need("date", p.inkDim, bg, 4.5f);
-    need("date-dot", p.accent, bg, 3.0f);
-  }
-  for (const Col &bg : {skyAt(p, 150), withGlow(skyAt(p, 150)), skyAt(p, 300), p.cloudLit, p.cloudShade}) // time
-    need("time", p.ink, bg, 7.0f);
-  for (const Col &bg : {skyAt(p, 362), p.far}) // where the feet of the digits meet the mountains
-    need("time-feet", p.ink, bg, 4.5f);
-  for (const Col &bg : {skyAt(p, 200), skyAt(p, 300)})
-    need("colon", p.accent, bg, 3.0f);
-  for (const Col &bg : {nearAt(p, 400), nearAt(p, 590)}) { // weather strip and rain chart
-    need("land-ink", Land::ink, bg, 7.0f);
-    need("land-dim", Land::inkDim, bg, 4.5f);
-    need("land-mute", Land::inkMute, bg, 4.5f);
-    need("bars", p.bars, bg, 4.5f);
-  }
-  return out;
-}
-
-// Walks every kind of weather through a whole day, minute by minute, and logs any moment where text would be hard
-// to read.
-void verifySkyContrast(SunTimes sun) {
+// Walks a whole day, every few minutes, in every kind of weather, and checks that the text theme keeps every piece
+// of text readable over the scene (with its backing). Logs how much backing the palettes needed at most, which is
+// worth keeping low: the less backing, the more of the scene shows.
+void verifyReadability(std::time_t day) {
   int failures = 0;
-  for (WeatherKind kind : {WeatherKind::Clear, WeatherKind::Grey, WeatherKind::Storm}) {
-    std::string last;
-    for (std::time_t t = sun.sunrise - 12 * 3600; t < sun.sunrise + 36 * 3600 && failures < 20; t += 60) {
-      const std::string problems = contrastProblems(skyPalette(t, sun, worldsFor(kind)));
-      if (problems.empty() || problems == last) continue;
-      last = problems;
+  for (int code : {0, 2, 3, 45, 53, 63, 65, 75, 95}) {
+    float haloMax = 0, scrimMax = 0;
+    bool light = true;
+    for (std::time_t t = day; t < day + 86400; t += 120) {
       const std::tm tm = localTime(t);
-      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Low contrast, weather %d at %02d:%02d:%s", (int)kind, tm.tm_hour,
-                  tm.tm_min, problems.c_str());
-      ++failures;
+      SceneState s;
+      applySky(s, Astro::skyAt(t, Config::latitude, Config::longitude), tm.tm_hour + tm.tm_min / 60.0f);
+      applyWeather(s, {true, code, 5, 270, 0});
+      s.snowCover *= s.snowIntensity;
+      deriveScene(s);
+      const Look l = lookFor(s);
+      const TextTheme th = textThemeFor(l, s, light);
+      light = th.lightInk;
+      haloMax = std::max({haloMax, th.haloTime, th.haloTop});
+      scrimMax = std::max({scrimMax, th.scrimStrip, th.scrimRain});
+      const Backdrops b = backdropsFor(l, s);
+      std::string problems;
+      auto need = [&](const char *what, Col ink, Col bg, float min) {
+        if (contrast(ink, bg) < min - 0.05f) problems += std::format(" {} {:.1f}<{:.1f}", what, contrast(ink, bg), min);
+      };
+      for (const Col &bg : b.time) {
+        need("time", th.ink, mix(bg, th.halo, th.haloTime), Readability::time);
+        need("colon", th.accent, mix(bg, th.halo, th.haloTime), Readability::accent);
+      }
+      for (const Col &bg : b.top)
+        need("date", th.inkDim, mix(bg, th.halo, th.haloTop), Readability::text);
+      for (const Col &bg : b.strip)
+        need("strip", th.landInk, mix(bg, th.scrim, th.scrimStrip), Readability::landInk);
+      for (const Col &bg : b.rain)
+        need("rain", th.landMute, mix(bg, th.scrim, th.scrimRain), Readability::text);
+      if (!problems.empty() && failures++ < 20)
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Low contrast, weather %d at %02d:%02d:%s", code, tm.tm_hour,
+                    tm.tm_min, problems.c_str());
     }
+    SDL_Log("Weather %2d: most backing behind the sky text %.2f, behind the land text %.2f", code, haloMax, scrimMax);
   }
-  if (failures == 0) SDL_Log("Sky contrast OK for every kind of weather and every minute of the day");
+  if (failures == 0) SDL_Log("Text readable in every kind of weather at every minute of the day");
 }
 #endif
 
@@ -469,19 +521,23 @@ public:
     auto open = [](const unsigned char *data, unsigned int len, float size) {
       return FontPtr(TTF_OpenFontIO(SDL_IOFromConstMem(data, len), true, size));
     };
-    fTime = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, Config::time_size);
-    fTempNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, 46.0f);
+    fTime = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, Layout::timeSize);
+    fTempNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, 40.0f);
     fWindNum = open(SpaceGrotesk_Medium_ttf, SpaceGrotesk_Medium_ttf_len, 30.0f);
-    fUnitLg = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 22.0f);
+    fUnitLg = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 20.0f);
     fUnitSm = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 16.0f);
-    fDate = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 22.0f);
+    fDate = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 20.0f);
+    fCondition = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 13.0f);
     fAxis = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 12.0f);
-    fAdvice = open(VictorMono_Italic_ttf, VictorMono_Italic_ttf_len, 33.0f);
-    fRainCap = open(VictorMono_Italic_ttf, VictorMono_Italic_ttf_len, 21.0f);
-    if (!fTime || !fTempNum || !fWindNum || !fUnitLg || !fUnitSm || !fDate || !fAxis || !fAdvice || !fRainCap) {
+    fAdvice = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 23.0f);
+    fRainCap = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 15.0f);
+    if (!fTime || !fTempNum || !fWindNum || !fUnitLg || !fUnitSm || !fDate || !fCondition || !fAxis || !fAdvice ||
+        !fRainCap) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't load embedded fonts: %s", SDL_GetError());
       return false;
     }
+
+    TTF_SetFontWrapAlignment(fAdvice.get(), TTF_HORIZONTAL_ALIGN_CENTER); // the advice is centred under the clock
 
     // Prefer proper typographic glyphs where the font carries them.
     windUnit = TTF_FontHasGlyph(fUnitSm.get(), 0x2044) ? "m\xE2\x81\x84s" : "m/s"; // m⁄s
@@ -493,7 +549,11 @@ public:
       return false;
     }
 #ifdef APP_DEBUG
-    verifySkyContrast(defaultSunTimes());
+    {
+      std::tm midnight = localNow();
+      midnight.tm_hour = midnight.tm_min = midnight.tm_sec = 0, midnight.tm_isdst = -1;
+      verifyReadability(std::mktime(&midnight));
+    }
 #endif
 
     if (!SDL_SetRenderLogicalPresentation(renderer.get(), Config::screen_width, Config::screen_height,
@@ -524,7 +584,7 @@ private:
   WindowPtr window;
   RendererPtr renderer;
 
-  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fAxis, fAdvice, fRainCap;
+  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fCondition, fAxis, fAdvice, fRainCap;
   std::array<TexturePtr, (std::size_t)Icon::COUNT> icons;
   std::string windUnit = "m/s";
   std::string approx = "~";
@@ -533,33 +593,32 @@ private:
 
   std::mutex weatherMutex;
   WeatherState weather;
-  SunTimes lastSun;     // kept across failed fetches: sun times do not go stale within the day
-  WeatherLook lastLook; // likewise the scene's weather, so a network blip does not clear the sky
+  WeatherInput lastInput; // kept across failed fetches, so a network blip does not clear the sky
 
   Scene scene;
+  SceneState sceneNow; // eased towards the forecast
+  bool haveScene = false;
+  double lastFrameSecs = 0;
 
-  // The palette on screen fades to a new target: quickly when the sky flips between dark and light (sunrise,
-  // sunset, a storm rolling in), slowly when the weather changes within the same polarity.
-  Palette shown = Worlds::Clear.night;
-  WeatherKind shownKind = WeatherKind::Clear;
-  bool haveShown = false;
-  Palette fadeFrom;
-  Uint64 fadeStartMs = 0;
-  float fadeMs = 0;
-  bool fading = false;
-  static constexpr float kFlipMs = 2500.0f;
-  static constexpr float kWeatherFadeMs = 12000.0f;
+  // The text colours follow the scene; when the sky text flips between light and dark ink (sunrise, sunset, a storm
+  // rolling in) it fades over a moment instead of snapping.
+  TextTheme theme;
+  bool haveTheme = false;
+  TextTheme flipFrom, shownTheme;
+  Uint64 flipStartMs = 0;
+  bool flipping = false;
+  static constexpr float kFlipMs = 2000.0f;
 
   const char *shotPath = nullptr;
   int shotFrame = 180;
   int frameCount = 0;
 
   // Cached label runs
-  TrackedLabel lDate;
-  Label lHH, lColon, lMM;
-  Label lTempNum, lTempUnit, lWindNum, lWindUnit;
-  Label lAdvice, lRainCap, lRainDry;
-  Label lAxisNow, lAxisMid, lAxisEnd;
+  TrackedLabel lDate{3}, lCondition{3};
+  Label lHH{10}, lColon{10}, lMM{10};
+  Label lTempNum{4}, lTempUnit{3}, lWindNum{4}, lWindUnit{3};
+  Label lAdvice{4}, lRainCap{3};
+  Label lAxisNow{2}, lAxisMid{2}, lAxisEnd{2};
 
   // Declared last so it is destroyed first; ~Clock also joins it explicitly.
   std::jthread weatherLoaderThread;
@@ -607,22 +666,6 @@ private:
     SDL_RenderFillRect(renderer.get(), &r);
   }
 
-  void fillCircle(float cx, float cy, float r, Col c) {
-    constexpr int seg = 20;
-    SDL_FColor fc{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
-    SDL_Vertex v[seg + 1];
-    int idx[seg * 3];
-    v[0] = {{cx, cy}, fc, {0, 0}};
-    for (int i = 0; i < seg; ++i) {
-      float a = (float)i / seg * 2.0f * (float)M_PI;
-      v[i + 1] = {{cx + std::cos(a) * r, cy + std::sin(a) * r}, fc, {0, 0}};
-      idx[i * 3] = 0;
-      idx[i * 3 + 1] = i + 1;
-      idx[i * 3 + 2] = (i + 1) % seg + 1;
-    }
-    SDL_RenderGeometry(renderer.get(), nullptr, v, seg + 1, idx, seg * 3);
-  }
-
   // --------------------------------------------------------------- data --
   // SDL keeps per-thread error strings for threads it did not create; the thread has to free them itself.
   struct SdlThreadCleanup {
@@ -633,17 +676,19 @@ private:
     SdlThreadCleanup cleanup;
     SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
     const auto url = cpr::Url{"https://api.open-meteo.com/v1/forecast"};
-    const auto params =
-        cpr::Parameters{{"latitude", "52.3738"},          {"longitude", "4.8910"},  {"current_weather", "true"},
-                        {"minutely_15", "precipitation"}, {"windspeed_unit", "ms"}, {"forecast_days", "2"},
-                        {"daily", "sunrise,sunset"},      {"timezone", "auto"}};
+    const auto params = cpr::Parameters{{"latitude", std::format("{:.4f}", Config::latitude)},
+                                        {"longitude", std::format("{:.4f}", Config::longitude)},
+                                        {"current_weather", "true"},
+                                        {"minutely_15", "precipitation"},
+                                        {"windspeed_unit", "ms"},
+                                        {"forecast_days", "1"},
+                                        {"timezone", "auto"}};
 
     while (!stopToken.stop_requested()) {
       bool ok = false;
-      double temp = 0, wind = 0;
+      double temp = 0, wind = 0, windDir = 270;
       int code = 0;
       std::vector<float> rain;
-      std::vector<SunTimes> sun;
       try {
         cpr::Response resp = cpr::Get(url, params, kConnectTimeout, kTimeout, abortOnStop(stopToken));
         if (resp.status_code == 200) {
@@ -652,6 +697,8 @@ private:
           temp = cw.at("temperature").get<double>();
           wind = cw.at("windspeed").get<double>();
           code = cw.at("weathercode").get<int>();
+          if (cw.contains("winddirection") && cw.at("winddirection").is_number())
+            windDir = cw.at("winddirection").get<double>();
 
           if (j.contains("minutely_15")) {
             const auto &m = j.at("minutely_15");
@@ -663,16 +710,6 @@ private:
               start++;
             for (std::size_t i = start; i < start + 8 && i < precip.size(); ++i) {
               rain.push_back(precip[i].is_null() ? 0.0f : (float)precip[i].get<double>());
-            }
-          }
-          if (j.contains("daily")) {
-            const auto &d = j.at("daily");
-            const auto &rises = d.at("sunrise");
-            const auto &sets = d.at("sunset");
-            for (std::size_t i = 0; i < rises.size() && i < sets.size(); ++i) {
-              if (!rises[i].is_string() || !sets[i].is_string()) continue;
-              const SunTimes st{parseTs(rises[i].get<std::string>()), parseTs(sets[i].get<std::string>())};
-              if (st.sunrise > 0 && st.sunset > st.sunrise) sun.push_back(st);
             }
           }
           ok = true;
@@ -690,14 +727,12 @@ private:
           weather.valid = true;
           weather.temperature = temp;
           weather.windspeed = wind;
+          weather.winddirection = windDir;
           weather.weathercode = code;
           weather.rain = std::move(rain);
-          weather.sun = std::move(sun);
           weather.advice = std::move(advice);
         } else {
-          std::vector<SunTimes> keep = std::move(weather.sun);
           weather = WeatherState{};
-          weather.sun = std::move(keep);
         }
       }
 
@@ -759,29 +794,43 @@ private:
   void Render() {
     const std::time_t t = now();
     const std::tm tm = localTime(t);
+    const double secs = (double)SDL_GetTicksNS() / 1e9;
 
     WeatherState w;
     {
       std::scoped_lock lock(weatherMutex);
       w = weather;
     }
-    for (const SunTimes &st : w.sun) {
-      const std::tm rise = localTime(st.sunrise);
-      if (rise.tm_yday == tm.tm_yday && rise.tm_year == tm.tm_year) lastSun = st;
-    }
-    if (lastSun.sunrise == 0 || localTime(lastSun.sunrise).tm_yday != tm.tm_yday) lastSun = defaultSunTimes();
-    const bool isDay = t >= lastSun.sunrise && t < lastSun.sunset;
-
 #ifdef APP_DEBUG
     if (const int fake = fakeWeatherCode(); fake >= 0) w = fakeWeather(fake);
 #endif
-    if (w.valid) lastLook = weatherLook(w.weathercode, (float)w.windspeed, w.rain.empty() ? 0.0f : w.rain.front());
-    const Palette p = CurrentPalette(skyPalette(t, lastSun, worldsFor(lastLook.kind)), lastLook.kind);
-    scene.Draw(renderer.get(), p, lastLook.c, t, lastSun, (double)SDL_GetTicksNS() / 1e9);
-    DrawDate(tm, p);
-    DrawTime(tm, p);
-    DrawWeatherStrip(w, isDay);
-    DrawRain(w, p);
+    if (w.valid) {
+      lastInput = {true, w.weathercode, (float)w.windspeed, (float)w.winddirection,
+                   w.rain.empty() ? 0.0f : w.rain.front()};
+    }
+
+    // The world right now: the sky over this place at this moment, and the forecast rolling in over a few seconds.
+    const Astro::Sky sky = Astro::skyAt(t, Config::latitude, Config::longitude);
+    SceneState target;
+    applySky(target, sky, (float)tm.tm_hour + tm.tm_min / 60.0f + tm.tm_sec / 3600.0f);
+    applyWeather(target, lastInput);
+    if (!haveScene) {
+      sceneNow = target;
+      sceneNow.snowCover = target.snowCover * target.snowIntensity;
+      haveScene = true;
+    } else {
+      easeScene(sceneNow, target, (float)std::clamp(secs - lastFrameSecs, 0.0, 0.5));
+    }
+    lastFrameSecs = secs;
+    deriveScene(sceneNow);
+    const Look look = lookFor(sceneNow);
+    const TextTheme th = CurrentTheme(textThemeFor(look, sceneNow, haveTheme ? theme.lightInk : true));
+
+    scene.Draw(renderer.get(), sceneNow, look, secs);
+    DrawTop(tm, w, th);
+    DrawTime(tm, th);
+    DrawWeatherStrip(w, sky.sun.elevation > -0.83, look, th);
+    DrawRain(w, th);
 
     if (shotPath && frameCount + 1 >= shotFrame) {
       if (SDL_Surface *s = SDL_RenderReadPixels(renderer.get(), nullptr)) {
@@ -792,117 +841,145 @@ private:
     SDL_RenderPresent(renderer.get());
   }
 
-  Palette CurrentPalette(const Palette &target, WeatherKind kind) {
-    const Uint64 ticks = SDL_GetTicks();
-    if (haveShown && (target.dark != shown.dark || kind != shownKind)) {
-      fadeFrom = shown;
-      fadeStartMs = ticks;
-      fadeMs = target.dark != shown.dark ? kFlipMs : kWeatherFadeMs;
-      fading = true;
+  static TextTheme mixTheme(const TextTheme &a, const TextTheme &b, float k) {
+    TextTheme t = b;
+    t.ink = mix(a.ink, b.ink, k);
+    t.inkDim = mix(a.inkDim, b.inkDim, k);
+    t.accent = mix(a.accent, b.accent, k);
+    // The backing fades out under the old ink and in under the new, rather than passing through grey.
+    t.halo = k < 0.5f ? a.halo : b.halo;
+    t.haloTime = k < 0.5f ? a.haloTime * (1.0f - 2.0f * k) : b.haloTime * (2.0f * k - 1.0f);
+    t.haloTop = k < 0.5f ? a.haloTop * (1.0f - 2.0f * k) : b.haloTop * (2.0f * k - 1.0f);
+    return t;
+  }
+
+  TextTheme CurrentTheme(const TextTheme &target) {
+    const Uint64 ms = SDL_GetTicks();
+    if (haveTheme && target.lightInk != theme.lightInk) {
+      flipFrom = shownTheme;
+      flipStartMs = ms;
+      flipping = true;
     }
-    haveShown = true;
-    shownKind = kind;
-    Palette p = target;
-    if (fading) {
-      const float k = std::clamp((float)(ticks - fadeStartMs) / fadeMs, 0.0f, 1.0f);
+    theme = target;
+    haveTheme = true;
+    shownTheme = target;
+    if (flipping) {
+      const float k = std::clamp((float)(ms - flipStartMs) / kFlipMs, 0.0f, 1.0f);
       if (k >= 1.0f)
-        fading = false;
+        flipping = false;
       else
-        p = mixPalette(fadeFrom, target, smooth01(k));
+        shownTheme = mixTheme(flipFrom, target, smooth01(k));
     }
-    shown = p;
-    shown.dark = target.dark;
-    return p;
+    return shownTheme;
   }
 
-  void DrawDate(const std::tm &tm, const Palette &p) {
-    lDate.set(renderer.get(), fDate.get(), toUpper(dateString(tm)), 3.2f); // tracked caps
-    // amber dot then date
-    float dotR = 3.6f;
-    float dotX = Config::pad_x;
-    float baseline = Config::date_baseline;
-    fillCircle(dotX + dotR, baseline - lDate.ascent * 0.42f, dotR, p.accent);
-    lDate.draw(renderer.get(), dotX + dotR * 2 + 12.0f, baseline, p.inkDim);
+  // The backing for a run of text that needs `need` (see backingFor): light ink always casts a soft shadow, dark ink
+  // only glows when it has to.
+  static Backing skyBacking(const TextTheme &th, float need) {
+    return backingFor(need, 0.45f * smooth01((relativeLuminance(th.ink) - 0.25f) / 0.5f));
   }
 
-  void DrawTime(const std::tm &tm, const Palette &p) {
-    lHH.set(renderer.get(), fTime.get(), std::format("{:02}", tm.tm_hour));
-    lMM.set(renderer.get(), fTime.get(), std::format("{:02}", tm.tm_min));
-    lColon.set(renderer.get(), fTime.get(), ":");
+  // Date on the left and the current conditions on the right, in small tracked capitals.
+  void DrawTop(const std::tm &tm, const WeatherState &w, const TextTheme &th) {
+    SDL_Renderer *r = renderer.get();
+    lDate.set(r, fDate.get(), toUpper(dateString(tm)), 3.0f);
+    lCondition.set(r, fCondition.get(), w.valid ? toUpper(conditionText(w.weathercode)) : "", 2.4f);
+    const float x = Layout::padX, B = Layout::dateBaseline;
+    const float condX = Config::screen_width - Layout::padX - lCondition.totalW, condB = B - 2.0f;
+    const Backing bk = skyBacking(th, th.haloTop);
+    drawSoftRect(r, x, B - lDate.ascent * 0.75f, x + lDate.totalW, B + 3.0f, 24.0f, th.halo, bk.panel);
+    if (lCondition.totalW > 0)
+      drawSoftRect(r, condX, condB - lCondition.ascent * 0.75f, condX + lCondition.totalW, condB + 3.0f, 20.0f, th.halo,
+                   bk.panel);
+    for (TrackedLabel *l : {&lDate, &lCondition}) {
+      l->shadowCol = th.halo;
+      l->shadowAlpha = bk.glyph;
+    }
+    lDate.draw(r, x, B, th.inkDim);
+    lCondition.draw(r, condX, condB, th.inkDim);
+  }
 
-    float gap = Config::time_size * 0.02f;
-    float total = lHH.w + gap + lColon.w + gap + lMM.w;
+  void DrawTime(const std::tm &tm, const TextTheme &th) {
+    SDL_Renderer *r = renderer.get();
+    lHH.set(r, fTime.get(), std::format("{:02}", tm.tm_hour));
+    lMM.set(r, fTime.get(), std::format("{:02}", tm.tm_min));
+    lColon.set(r, fTime.get(), ":");
+
+    const float gap = Layout::timeSize * 0.02f;
+    const float total = lHH.w + gap + lColon.w + gap + lMM.w;
     float x = (Config::screen_width - total) / 2.0f;
-    float base = Config::time_baseline;
+    const float base = Layout::timeBaseline;
+    const Backing bk = skyBacking(th, th.haloTime);
+    drawSoftRect(r, x + 10.0f, Layout::timeTop - 4.0f, x + total - 10.0f, base + 4.0f, 80.0f, th.halo, bk.panel);
 
     // gentle colon pulse
-    float ph = (float)(SDL_GetTicks() % 2000) / 2000.0f;
-    float pulse = 0.45f + 0.55f * (0.5f + 0.5f * std::cos(ph * 2.0f * (float)M_PI));
+    const float ph = (float)(SDL_GetTicks() % 2000) / 2000.0f;
+    const float pulse = 0.6f + 0.4f * (0.5f + 0.5f * std::cos(ph * 2.0f * (float)M_PI));
 
-    lHH.drawBase(renderer.get(), x, base, p.ink);
-    x += lHH.w + gap;
-    lColon.drawBase(renderer.get(), x, base - Config::time_size * 0.02f, p.accent, pulse);
-    x += lColon.w + gap;
-    lMM.drawBase(renderer.get(), x, base, p.ink);
-  }
-
-  void DrawWeatherStrip(const WeatherState &w, bool isDay) {
-    const float B = Config::strip_baseline;
-    std::string tempStr = w.valid ? std::format("{:.0f}", w.temperature) : "--";
-    std::string windStr = w.valid ? std::format("{:.0f}", w.windspeed) : "--";
-    lTempNum.set(renderer.get(), fTempNum.get(), tempStr);
-    lTempUnit.set(renderer.get(), fUnitLg.get(), deg + "C");
-    lWindNum.set(renderer.get(), fWindNum.get(), windStr);
-    lWindUnit.set(renderer.get(), fUnitSm.get(), windUnit);
-
-    // --- temperature cell: [condition icon] NN °C ---
-    float x = Config::pad_x;
-    Icon cond = w.valid ? iconFor(w.weathercode, isDay) : Icon::Cloudy;
-    float tIcon = 40.0f;
-    float numCenter = B - lTempNum.ascent * 0.36f; // rough optical centre of the figures
-    drawIcon(cond, x, numCenter - tIcon / 2.0f, tIcon, Land::inkDim);
-    x += tIcon + 16.0f;
-    lTempNum.drawBase(renderer.get(), x, B, Land::ink);
-    x += lTempNum.w + 6.0f;
-    lTempUnit.drawBase(renderer.get(), x, B, Land::inkDim);
-    x += lTempUnit.w;
-
-    // divider
-    float divTop = B - 34.0f, divBot = B + 6.0f;
-    float d1 = x + 30.0f;
-    fillRect(d1, divTop, 1.0f, divBot - divTop, Land::hair);
-
-    // --- wind cell: [wind icon] N m/s ---
-    x = d1 + 30.0f;
-    float wIcon = 27.0f;
-    float wNumCenter = B - lWindNum.ascent * 0.36f;
-    drawIcon(Icon::Wind, x, wNumCenter - wIcon / 2.0f, wIcon, Land::inkDim);
-    x += wIcon + 12.0f;
-    lWindNum.drawBase(renderer.get(), x, B, Land::ink);
-    x += lWindNum.w + 5.0f;
-    lWindUnit.drawBase(renderer.get(), x, B, Land::inkDim);
-    x += lWindUnit.w;
-
-    float d2 = x + 30.0f;
-    fillRect(d2, divTop, 1.0f, divBot - divTop, Land::hair);
-
-    // --- advice cell: cursive, right-aligned, fills remaining width ---
-    float adviceRight = Config::screen_width - Config::pad_x;
-    int wrapW = (int)std::clamp(adviceRight - (d2 + 30.0f), 220.0f, 470.0f);
-    lAdvice.set(renderer.get(), fAdvice.get(), w.advice, wrapW);
-    if (lAdvice.tex) {
-      float ax = adviceRight - lAdvice.w;
-      float ay = (numCenter)-lAdvice.h / 2.0f + 4.0f;
-      lAdvice.drawTop(renderer.get(), ax, ay, Land::ink);
+    for (Label *l : {&lHH, &lColon, &lMM}) {
+      l->shadowCol = th.halo;
+      l->shadowAlpha = bk.glyph;
     }
+    lHH.drawBase(r, x, base, th.ink);
+    x += lHH.w + gap;
+    lColon.drawBase(r, x, base - Layout::timeSize * 0.02f, th.accent, pulse);
+    x += lColon.w + gap;
+    lMM.drawBase(r, x, base, th.ink);
   }
 
-  void DrawRain(const WeatherState &w, const Palette &p) {
-    const float left = Config::pad_x;
-    const float right = Config::screen_width - Config::pad_x;
-    const float CW = right - left;
+  // Centred under the clock: [condition] NN °C   [wind] N m/s, and the clothing advice below.
+  void DrawWeatherStrip(const WeatherState &w, bool isDay, const Look &look, const TextTheme &th) {
+    SDL_Renderer *r = renderer.get();
+    const float B = Layout::stripBaseline;
+    lTempNum.set(r, fTempNum.get(), w.valid ? std::format("{:.0f}", w.temperature) : "--");
+    lTempUnit.set(r, fUnitLg.get(), deg + "C");
+    lWindNum.set(r, fWindNum.get(), w.valid ? std::format("{:.0f}", w.windspeed) : "--");
+    lWindUnit.set(r, fUnitSm.get(), windUnit);
+    lAdvice.set(r, fAdvice.get(), w.valid ? w.advice : "", 700);
 
-    bool hasRain = false;
+    constexpr float tIcon = 36.0f, wIcon = 26.0f;
+    const float row =
+        tIcon + 12.0f + lTempNum.w + 4.0f + lTempUnit.w + 44.0f + wIcon + 10.0f + lWindNum.w + 5.0f + lWindUnit.w;
+    float x = (Config::screen_width - row) / 2.0f;
+
+    // Backing, where the land is not dark enough on its own (fog, snow); a third line of advice reaches the water.
+    const float left = std::min(x, (Config::screen_width - lAdvice.w) / 2.0f) - 6.0f;
+    const float right = Config::screen_width - left;
+    const float adviceTop = Layout::adviceBaseline - lAdvice.ascent;
+    float scrim = th.scrimStrip;
+    if (adviceTop + lAdvice.h > Layout::horizonY)
+      scrim = std::max(scrim, backingNeeded(th.landInk, th.scrim, {waterColour(look)}, Readability::landInk, 0.85f));
+    const Backing bk = backingFor(scrim, 0.5f);
+    drawSoftRect(r, left, B - 34.0f, right, std::max(B + 8.0f, adviceTop + lAdvice.h), 48.0f, th.scrim, bk.panel);
+
+    for (Label *l : {&lTempNum, &lTempUnit, &lWindNum, &lWindUnit, &lAdvice})
+      l->shadowAlpha = bk.glyph;
+    const float numCenter = B - lTempNum.ascent * 0.36f; // rough optical centre of the figures
+    drawIcon(w.valid ? iconFor(w.weathercode, isDay) : Icon::Cloudy, x, numCenter - tIcon / 2.0f, tIcon,
+             mix(th.landAccent, th.landInk, 0.35f));
+    x += tIcon + 12.0f;
+    lTempNum.drawBase(r, x, B, th.landInk);
+    x += lTempNum.w + 4.0f;
+    lTempUnit.drawBase(r, x, B, th.landDim);
+    x += lTempUnit.w + 44.0f;
+    const float wNumCenter = B - lWindNum.ascent * 0.36f;
+    drawIcon(Icon::Wind, x, wNumCenter - wIcon / 2.0f, wIcon, th.landDim);
+    x += wIcon + 10.0f;
+    lWindNum.drawBase(r, x, B, th.landInk);
+    x += lWindNum.w + 5.0f;
+    lWindUnit.drawBase(r, x, B, th.landDim);
+
+    lAdvice.drawTop(r, (Config::screen_width - lAdvice.w) / 2.0f, adviceTop, th.landInk);
+  }
+
+  // The next two hours of rain as eight 15-minute segments, with a caption above and a time axis below.
+  void DrawRain(const WeatherState &w, const TextTheme &th) {
+    SDL_Renderer *r = renderer.get();
+    const float left = Layout::padX, right = Config::screen_width - Layout::padX, CW = right - left;
+    const Backing bk = backingFor(th.scrimRain, 0.5f);
+    drawSoftRect(r, left, Layout::rainCapBaseline - 16.0f, right, Layout::rainAxisBaseline + 4.0f, 36.0f, th.scrim,
+                 bk.panel);
+
     float peak = 0;
     int peakIdx = 0;
     for (std::size_t i = 0; i < w.rain.size(); ++i) {
@@ -910,45 +987,48 @@ private:
         peak = w.rain[i];
         peakIdx = (int)i;
       }
-      if (w.rain[i] > 0.05f) hasRain = true;
+    }
+    const bool hasRain = peak > 0.05f;
+    std::string cap;
+    if (!w.valid) {
+      cap = "Checking the sky\xE2\x80\xA6";
+    } else if (!hasRain) {
+      cap = "No rain expected" + mdot + "next 2h";
+    } else {
+      const char *word = peak < 0.3f ? "Light" : (peak < 1.0f ? "Moderate" : "Heavy");
+      cap = peakIdx == 0 ? std::format("{} rain{}peak now", word, mdot)
+                         : std::format("{} rain{}peak in {}{} min", word, mdot, approx, peakIdx * 15);
+    }
+    lRainCap.set(r, fRainCap.get(), cap);
+    lRainCap.shadowAlpha = bk.glyph;
+    lRainCap.drawBase(r, left + (CW - lRainCap.w) / 2.0f, Layout::rainCapBaseline,
+                      hasRain ? th.landAccent : th.landDim);
+
+    constexpr int segments = 8;
+    constexpr float gap = 8.0f, base = 4.0f;
+    const float sw = (CW - gap * (segments - 1)) / segments;
+    const float bottom = Layout::rainBarY + base;
+    for (int i = 0; i < segments; ++i) {
+      const float mm = i < (int)w.rain.size() ? w.rain[i] : 0.0f;
+      const float sx = left + i * (sw + gap);
+      if (mm > 0.05f) {
+        const float hh = base + std::clamp(mm / 2.0f, 0.0f, 1.0f) * 14.0f;
+        fillRect(sx, bottom - hh, sw, hh, th.landAccent);
+      } else {
+        Col c = th.landInk;
+        c.a = 70;
+        fillRect(sx, bottom - base, sw, base, c);
+      }
     }
 
-    if (!w.valid || !hasRain) {
-      std::string msg = w.valid ? "No rain expected \xC2\xB7 next 2h" : "Checking the sky\xE2\x80\xA6";
-      lRainDry.set(renderer.get(), fRainCap.get(), msg);
-      lRainDry.drawBase(renderer.get(), left + (CW - lRainDry.w) / 2.0f, Config::rain_chart_top + 24.0f, Land::inkDim);
-      return;
-    }
-
-    // caption
-    const char *word = peak < 0.3f ? "Light" : (peak < 1.0f ? "Moderate" : "Heavy");
-    int mins = peakIdx * 15;
-    std::string cap = mins <= 0 ? std::format("{} rain{}peak now", word, mdot)
-                                : std::format("{} rain{}peak in {}{} min", word, mdot, approx, mins);
-    lRainCap.set(renderer.get(), fRainCap.get(), cap);
-    lRainCap.drawBase(renderer.get(), left, Config::rain_cap_baseline, p.bars);
-
-    // bars
-    const float chartBottom = Config::rain_chart_top + Config::rain_chart_h;
-    fillRect(left, chartBottom, CW, 1.0f, Land::hair);
-    std::size_t n = w.rain.size();
-    if (n == 0) return;
-    const float gap = 6.0f;
-    const float bw = (CW - gap * (n - 1)) / n;
-    const float scale = 2.0f; // mm per 15 min mapped to full height
-    for (std::size_t i = 0; i < n; ++i) {
-      float hh = std::clamp(w.rain[i] / scale, 0.0f, 1.0f) * (Config::rain_chart_h - 1.0f);
-      if (hh < 1.0f) continue;
-      fillRect(left + i * (bw + gap), chartBottom - hh, bw, hh, p.bars);
-    }
-
-    // axis
-    lAxisNow.set(renderer.get(), fAxis.get(), "NOW");
-    lAxisMid.set(renderer.get(), fAxis.get(), "+1H");
-    lAxisEnd.set(renderer.get(), fAxis.get(), "+2H");
-    lAxisNow.drawBase(renderer.get(), left, Config::rain_axis_baseline, Land::inkMute);
-    lAxisMid.drawBase(renderer.get(), left + (CW - lAxisMid.w) / 2.0f, Config::rain_axis_baseline, Land::inkMute);
-    lAxisEnd.drawBase(renderer.get(), right - lAxisEnd.w, Config::rain_axis_baseline, Land::inkMute);
+    lAxisNow.set(r, fAxis.get(), "NOW");
+    lAxisMid.set(r, fAxis.get(), "+1H");
+    lAxisEnd.set(r, fAxis.get(), "+2H");
+    for (Label *l : {&lAxisNow, &lAxisMid, &lAxisEnd})
+      l->shadowAlpha = bk.glyph;
+    lAxisNow.drawBase(r, left, Layout::rainAxisBaseline, th.landMute);
+    lAxisMid.drawBase(r, left + (CW - lAxisMid.w) / 2.0f, Layout::rainAxisBaseline, th.landMute);
+    lAxisEnd.drawBase(r, right - lAxisEnd.w, Layout::rainAxisBaseline, th.landMute);
   }
 };
 
