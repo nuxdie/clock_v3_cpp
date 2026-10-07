@@ -268,25 +268,41 @@ WeatherState fakeWeather(int code) {
   return w;
 }
 
-// Debug: APP_FAKE_EVENTS="20:00 Dinner;22:30 Call" puts those events at their next such time (today, or tomorrow
-// once it has passed), so the event horizon can be checked without a calendar.
+// Debug: APP_FAKE_EVENTS="20:00-21:30 Dinner;22:30 Call;Birthday;3d Trip" puts those events at their next such
+// time (today, or tomorrow once it has ended), so the event horizon can be checked without a calendar. Without an
+// end, an event lasts an hour; without a time it is an all-day event today, for a day or for "3d" days.
 std::vector<Calendar::Event> fakeEvents() {
   std::vector<Calendar::Event> events;
   const char *env = SDL_getenv("APP_FAKE_EVENTS");
   if (!env) return events;
   const std::time_t t = now();
   for (std::string_view item : Calendar::detail::split(env, ';')) {
-    int h = 0, m = 0, used = 0;
+    int h = 0, m = 0, eh = -1, em = 0, used = 0;
     const std::string s(item);
-    if (std::sscanf(s.c_str(), " %d:%d %n", &h, &m, &used) < 2) continue;
     std::tm tm = localTime(t);
+    if (std::sscanf(s.c_str(), " %d:%d-%d:%d %n", &h, &m, &eh, &em, &used) < 4) {
+      eh = -1;
+      if (std::sscanf(s.c_str(), " %d:%d %n", &h, &m, &used) < 2) {
+        int days = 1;
+        used = 0;
+        if (std::sscanf(s.c_str(), " %dd %n", &days, &used) < 1) days = 1, used = 0;
+        tm.tm_hour = tm.tm_min = tm.tm_sec = 0, tm.tm_isdst = -1;
+        const std::time_t from = std::mktime(&tm);
+        tm.tm_mday += std::max(1, days), tm.tm_isdst = -1;
+        const std::size_t first = s.find_first_not_of(' ', used);
+        if (first != std::string::npos) events.push_back({from, std::mktime(&tm), s.substr(first), true});
+        continue;
+      }
+    }
     tm.tm_hour = h, tm.tm_min = m, tm.tm_sec = 0, tm.tm_isdst = -1;
     std::time_t at = std::mktime(&tm);
-    if (at < t) {
+    std::time_t length = 3600;
+    if (eh >= 0) length = ((eh * 60 + em - h * 60 - m + 24 * 60) % (24 * 60)) * 60; // may end after midnight
+    if (at + length <= t) {
       tm.tm_mday += 1, tm.tm_isdst = -1;
       at = std::mktime(&tm);
     }
-    events.push_back({at, at + 3600, s.substr(used), false});
+    events.push_back({at, at + length, s.substr(used), false});
   }
   std::sort(events.begin(), events.end(), [](const auto &a, const auto &b) { return a.start < b.start; });
   return events;
@@ -623,8 +639,9 @@ public:
     fAdvice = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 23.0f);
     fMarkTitle = open(Inter_Medium_ttf, Inter_Medium_ttf_len, 15.0f);
     fMarkWhen = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 15.0f);
+    fAllDay = open(Inter_Regular_ttf, Inter_Regular_ttf_len, 17.0f);
     if (!fTime || !fTempNum || !fWindNum || !fUnitLg || !fUnitSm || !fDate || !fCondition || !fAxis || !fAdvice ||
-        !fMarkTitle || !fMarkWhen) {
+        !fMarkTitle || !fMarkWhen || !fAllDay) {
       SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "Couldn't load embedded fonts: %s", SDL_GetError());
       return false;
     }
@@ -679,7 +696,8 @@ private:
   WindowPtr window;
   RendererPtr renderer;
 
-  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fCondition, fAxis, fAdvice, fMarkTitle, fMarkWhen;
+  FontPtr fTime, fTempNum, fWindNum, fUnitLg, fUnitSm, fDate, fCondition, fAxis, fAdvice, fMarkTitle, fMarkWhen,
+      fAllDay;
   std::array<TexturePtr, (std::size_t)Icon::COUNT> icons;
   TexturePtr icCalendar, icCall, icSun, icDot, icGlow;
   std::string windUnit = "m/s";
@@ -719,6 +737,7 @@ private:
   Label lHH{10}, lColon{10}, lMM{10};
   Label lTempNum{4}, lTempUnit{3}, lWindNum{4}, lWindUnit{3};
   Label lAdvice{4};
+  Label lAllDay{3};
   std::array<Label, 5> lAxis{Label{2}, Label{2}, Label{2}, Label{2}, Label{2}};
   static constexpr int kMarkLabels = 8, kBandLabels = 3;
   std::array<Label, kMarkLabels> lMarkTitle{Label{3}, Label{3}, Label{3}, Label{3},
@@ -1032,10 +1051,11 @@ private:
     const TextTheme th = CurrentTheme(textThemeFor(look, sceneNow, haveTheme ? theme.lightInk : true));
 
     scene.Draw(renderer.get(), sceneNow, look, secs);
-    DrawTop(tm, w, th);
+    const std::vector<Calendar::Event> events = CurrentEvents();
+    DrawTop(tm, w, th, Horizon::allDayLine(events, t));
     DrawTime(tm, th);
     DrawWeatherStrip(w, sky.sun.elevation > Horizon::sunriseElevation, look, th);
-    DrawHorizon(t, w, th, dt);
+    DrawHorizon(t, w, events, th, dt);
 
     if (shotPath && frameCount + 1 >= shotFrame) {
       if (SDL_Surface *s = SDL_RenderReadPixels(renderer.get(), nullptr)) {
@@ -1084,8 +1104,17 @@ private:
     return backingFor(need, 0.45f * smooth01((relativeLuminance(th.ink) - 0.25f) / 0.5f));
   }
 
-  // Date on the left and the current conditions on the right, in small tracked capitals.
-  void DrawTop(const std::tm &tm, const WeatherState &w, const TextTheme &th) {
+  std::vector<Calendar::Event> CurrentEvents() {
+#ifdef APP_DEBUG
+    if (SDL_getenv("APP_FAKE_EVENTS")) return fakeEvents();
+#endif
+    std::scoped_lock lock(calendarMutex);
+    return calendarEvents;
+  }
+
+  // Date on the left and the current conditions on the right, in small tracked capitals; today's all-day events
+  // under the date.
+  void DrawTop(const std::tm &tm, const WeatherState &w, const TextTheme &th, const std::string &allDay) {
     SDL_Renderer *r = renderer.get();
     lDate.set(r, fDate.get(), toUpper(dateString(tm)), 3.0f);
     lCondition.set(r, fCondition.get(), w.valid ? toUpper(conditionText(w.weathercode)) : "", 2.4f);
@@ -1102,6 +1131,17 @@ private:
     }
     lDate.draw(r, x, B, th.inkDim);
     lCondition.draw(r, condX, condB, th.inkDim);
+
+    lAllDay.set(r, fAllDay.get(), ellipsize(allDay, 64));
+    if (lAllDay.w > 0) {
+      constexpr float icon = 18.0f, gap = 8.0f;
+      const float aB = Layout::allDayBaseline, tx = x + icon + gap;
+      drawSoftRect(r, x, aB - lAllDay.ascent * 0.75f, tx + lAllDay.w, aB + 3.0f, 22.0f, th.halo, bk.panel);
+      lAllDay.shadowCol = th.halo;
+      lAllDay.shadowAlpha = bk.glyph;
+      drawTex(icCalendar.get(), x + icon / 2.0f, aB - 6.0f, icon, mix(Col{184, 150, 255}, th.inkDim, 0.4f), 1.0f);
+      lAllDay.drawBase(r, tx, aB, th.inkDim);
+    }
   }
 
   void DrawTime(const std::tm &tm, const TextTheme &th) {
@@ -1180,15 +1220,8 @@ private:
   // The event horizon (horizon.h): the next four hours on one time scale, with rain and snow as bands on the line,
   // and the sun and the calendar as marks with a label above. Labels that would collide give way, soonest events
   // first; their marks stay. Marks grow and brighten as their time comes closer.
-  void DrawHorizon(std::time_t t, const WeatherState &w, const TextTheme &th, float dt) {
-    std::vector<Calendar::Event> events;
-    {
-      std::scoped_lock lock(calendarMutex);
-      events = calendarEvents;
-    }
-#ifdef APP_DEBUG
-    if (SDL_getenv("APP_FAKE_EVENTS")) events = fakeEvents();
-#endif
+  void DrawHorizon(std::time_t t, const WeatherState &w, const std::vector<Calendar::Event> &events,
+                   const TextTheme &th, float dt) {
     const Horizon::Model m =
         Horizon::modelFor(t, w.valid ? w.precip : Horizon::Precip{}, events, Config::latitude, Config::longitude);
     const float target = m.relevant ? 1.0f : 0.0f;
@@ -1232,6 +1265,18 @@ private:
       fillRect(x0, lineY - 1.0f - hh, x1 - x0, hh, withAlpha(snow ? snowCol : rainCol, 0.9f * A));
     }
 
+    // Events: a span on the line from start (or now) to end, in the event's colour, with a cap at the end. Events that
+    // overlap stack in lanes below the line.
+    for (const Horizon::Mark &mk : m.marks) {
+      if (mk.beyond || mk.end <= mk.at || (mk.kind != Horizon::Mark::Kind::Event && mk.kind != Horizon::Mark::Kind::Call))
+        continue;
+      const float x0 = xAt(std::max(mk.at, t)), x1 = xAt(mk.end);
+      const Col c = markColour(mk.kind);
+      const float y = laneY(mk);
+      fillRect(x0, y - 2.0f, x1 - x0, 4.0f, withAlpha(c, 0.55f * A));
+      if (mk.end <= t + Horizon::span) fillRect(x1 - 1.5f, y - 5.0f, 1.5f, 10.0f, withAlpha(c, 0.8f * A));
+    }
+
     // Labels, in order of importance; one that would overlap a label already placed is left out.
     struct Box {
       float x0, x1, y0, y1;
@@ -1247,14 +1292,15 @@ private:
     constexpr float icon = 20.0f, gap = 6.0f;
     const float whenB = Layout::horizonWhenBaseline;
 
-    // Events first, then the rain and snow, then the sun.
+    // Events coming up first, then the ones going on now, then the rain and snow, then the sun.
     int slot = 0;
-    for (const Horizon::Mark &mk : m.marks) {
-      if (slot >= kMarkLabels) break;
-      const bool sun = mk.kind == Horizon::Mark::Kind::Sunrise || mk.kind == Horizon::Mark::Kind::Sunset;
-      if (sun) continue;
-      DrawMark(mk, slot++, t, xAt(mk.beyond ? t + Horizon::span : mk.at), th, bk, A, place);
-    }
+    for (const bool begun : {false, true})
+      for (const Horizon::Mark &mk : m.marks) {
+        if (slot >= kMarkLabels) break;
+        const bool sun = mk.kind == Horizon::Mark::Kind::Sunrise || mk.kind == Horizon::Mark::Kind::Sunset;
+        if (sun || (mk.at <= t) != begun) continue;
+        DrawMark(mk, slot++, t, xAt(mk.beyond ? t + Horizon::span : mk.at), th, bk, A, place);
+      }
     for (std::size_t i = 0; i < m.bands.size() && (int)i < kBandLabels; ++i) {
       const Horizon::Band &b = m.bands[i];
       Label &l = lBand[i];
@@ -1279,20 +1325,26 @@ private:
     }
   }
 
+  // Where an event's span and dot sit: on the line, or a lane below it when it overlaps an earlier one.
+  static float laneY(const Horizon::Mark &mk) { return Layout::horizonLineY + mk.lane * Layout::horizonLaneStep; }
+
+  static Col markColour(Horizon::Mark::Kind kind) {
+    using Kind = Horizon::Mark::Kind;
+    return kind == Kind::Call ? Col{255, 128, 200} : kind == Kind::Event ? Col{184, 150, 255} : Col{255, 180, 86};
+  }
+
   template <typename Place>
   void DrawMark(const Horizon::Mark &mk, int slot, std::time_t t, float x, const TextTheme &th, const Backing &bk,
                 float A, Place &place) {
     using Kind = Horizon::Mark::Kind;
     SDL_Renderer *r = renderer.get();
-    const Col colour = mk.kind == Kind::Call    ? Col{255, 128, 200}
-                       : mk.kind == Kind::Event ? Col{184, 150, 255}
-                                                : Col{255, 180, 86};
+    const Col colour = markColour(mk.kind);
     // How close it is: 0 at the far end of the window (or beyond it), 1 now; and within the last half hour.
     const float near = mk.beyond ? 0.0f : 1.0f - std::clamp((float)(mk.at - t) / (float)Horizon::span, 0.0f, 1.0f);
     const float soon = mk.beyond ? 0.0f : smooth01(1.0f - (float)(mk.at - t) / 1800.0f);
     const bool event = mk.kind == Kind::Event || mk.kind == Kind::Call;
     const float radius = event ? 3.5f + 2.5f * near * near : 3.5f;
-    const float lineY = Layout::horizonLineY;
+    const float lineY = laneY(mk);
 
     // The label: an icon, the title, and the time below it.
     Label &title = lMarkTitle[slot], &when = lMarkWhen[slot];

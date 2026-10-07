@@ -28,6 +28,7 @@ namespace Layout {
 // Text. The date and the time sit on the sky; the weather row, the advice and the event horizon on the land.
 constexpr float padX = 48.0f;
 constexpr float dateBaseline = 60.0f;
+constexpr float allDayBaseline = 92.0f; // today's all-day events, under the date
 constexpr float timeSize = 250.0f;
 constexpr float timeBaseline = 294.0f;
 constexpr float timeTop = 118.0f; // top of the digits
@@ -36,6 +37,7 @@ constexpr float adviceBaseline = 410.0f;
 constexpr float horizonTitleBaseline = 514.0f; // event horizon: a mark's title,
 constexpr float horizonWhenBaseline = 532.0f;  // its time (and the rain and snow captions),
 constexpr float horizonLineY = 550.0f;         // the time scale,
+constexpr float horizonLaneStep = 6.0f;        // overlapping events stack below it,
 constexpr float horizonAxisBaseline = 578.0f;  // and NOW .. +4H
 
 // Landscape, back to front.
